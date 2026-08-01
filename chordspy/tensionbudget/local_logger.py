@@ -1,0 +1,288 @@
+"""
+Local Session Logger & User Profile Manager
+===========================================
+Manages per-user local folders under `output_logs/<user_name>/`, saving profile
+metadata (`user_profile.json`), dynamic Age and BMI computations, and logging
+10-minute periodic ergonomic feature rows into wide-format CSVs ready for later
+manual ingestion into PostgreSQL.
+"""
+
+import csv
+import json
+import math
+import os
+import re
+from datetime import datetime, date
+from pathlib import Path
+
+LOGS_ROOT = Path("output_logs")
+
+CSV_HEADER = [
+    "epoch_index",
+    "timestamp",
+    "elapsed_minutes",
+    "composite_score",
+    "eindex_live_left",
+    "eindex_live_right",
+    "eindex_cumulative_left",
+    "eindex_cumulative_right",
+    "short_suma_penalty_left",
+    "short_suma_penalty_right",
+    "total_suma_bursts_left",
+    "total_suma_bursts_right",
+    "gap_frequency_left",
+    "gap_frequency_right",
+    "apdf_10_left",
+    "apdf_50_left",
+    "apdf_90_left",
+    "apdf_10_right",
+    "apdf_50_right",
+    "apdf_90_right",
+    "asymmetry_index_ai",
+    "asymmetry_penalty_applied",
+    "mdf_hz_left",
+    "mnf_hz_left",
+    "fatigue_slope_left",
+    "mdf_computed_left",
+    "is_fatiguing_left",
+    "mdf_hz_right",
+    "mnf_hz_right",
+    "fatigue_slope_right",
+    "mdf_computed_right",
+    "is_fatiguing_right",
+]
+
+
+class LocalSessionLogger:
+    def __init__(
+        self,
+        user_name: str,
+        birth_date_str: str = "",
+        gender_sex: str = "Unspecified",
+        weight_kg: float = None,
+        height_cm: float = None,
+    ):
+        # Sanitize folder name (replace spaces and special chars with underscores)
+        raw_name = user_name.strip() if user_name.strip() else "Anonymous_User"
+        self.user_folder_name = re.sub(r"[^\w\-]", "_", raw_name)
+        self.user_dir = LOGS_ROOT / self.user_folder_name
+        self.user_dir.mkdir(parents=True, exist_ok=True)
+
+        self.user_name = raw_name
+        self.birth_date_str = birth_date_str.strip()
+        self.gender_sex = gender_sex
+        self.weight_kg = weight_kg
+        self.height_cm = height_cm
+
+        self.session_timestamp_str = None
+        self.csv_path = None
+        self.meta_path = None
+        self.is_active = False
+
+        # Compute dynamic metrics and save/update profile
+        self.age_years, self.bmi_value = self._update_user_profile()
+
+    def _calculate_age(self, reference_date=None) -> float:
+        if not self.birth_date_str:
+            return None
+        try:
+            if reference_date is None:
+                reference_date = datetime.now().date()
+            b_date = datetime.strptime(self.birth_date_str, "%Y-%m-%d").date()
+            days = (reference_date - b_date).days
+            if days >= 0:
+                return round(days / 365.25, 1)
+        except Exception:
+            pass
+        return None
+
+    def _calculate_bmi(self) -> float:
+        try:
+            if self.weight_kg is not None and self.height_cm is not None and self.height_cm > 0 and self.weight_kg > 0:
+                height_m = self.height_cm / 100.0
+                return round(self.weight_kg / (height_m * height_m), 2)
+        except Exception:
+            pass
+        return None
+
+    def _update_user_profile(self):
+        age = self._calculate_age()
+        bmi = self._calculate_bmi()
+        profile_path = self.user_dir / "user_profile.json"
+        
+        # Load existing if available to preserve created_at or fill defaults
+        existing = {}
+        if profile_path.exists():
+            try:
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+
+        created_at = existing.get("created_at", datetime.now().isoformat())
+        
+        profile_data = {
+            "user_name": self.user_name,
+            "birth_date": self.birth_date_str,
+            "gender_sex": self.gender_sex,
+            "weight_kg": self.weight_kg,
+            "height_cm": self.height_cm,
+            "current_computed_age": age,
+            "current_computed_bmi": bmi,
+            "created_at": created_at,
+            "last_updated_at": datetime.now().isoformat(),
+        }
+
+        try:
+            with open(profile_path, "w", encoding="utf-8") as f:
+                json.dump(profile_data, f, indent=4)
+        except Exception as e:
+            print(f"Warning: Could not save user_profile.json: {e}")
+
+        return age, bmi
+
+    def start_session(self, mode: str, calibration_left: float, calibration_right: float, source_info: str = ""):
+        """Initializes a new recording session within the user's folder."""
+        now = datetime.now()
+        self.session_timestamp_str = now.strftime("%Y%m%d_%H%M%S")
+        
+        base_filename = f"session_{self.session_timestamp_str}"
+        self.csv_path = self.user_dir / f"{base_filename}_features.csv"
+        self.meta_path = self.user_dir / f"{base_filename}_metadata.json"
+
+        meta_data = {
+            "session_id": self.session_timestamp_str,
+            "user_name": self.user_name,
+            "mode": mode,
+            "source_info": source_info,
+            "start_time": now.isoformat(),
+            "end_time": None,
+            "status": "active",
+            "user_snapshot": {
+                "birth_date": self.birth_date_str,
+                "gender_sex": self.gender_sex,
+                "weight_kg": self.weight_kg,
+                "height_cm": self.height_cm,
+                "age_years_at_session": self.age_years,
+                "bmi_at_session": self.bmi_value,
+            },
+            "calibration_baselines_mv": {
+                "left": calibration_left,
+                "right": calibration_right,
+            },
+        }
+
+        try:
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_data, f, indent=4)
+        except Exception as e:
+            print(f"Warning: Could not save session metadata: {e}")
+
+        # Write CSV Header
+        try:
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(CSV_HEADER)
+        except Exception as e:
+            print(f"Warning: Could not initialize features CSV: {e}")
+
+        self.is_active = True
+        print(f"\n[LocalLogger] Session started for user '{self.user_name}' -> {self.csv_path}")
+
+    def log_epoch(
+        self,
+        epoch_index: int,
+        elapsed_minutes: float,
+        composite_score: float,
+        score_left_dict: dict,
+        score_right_dict: dict,
+        spectral_left_dict: dict,
+        spectral_right_dict: dict,
+        asymmetry_index: float,
+        asymmetry_penalty_applied: bool,
+    ):
+        """Appends one 10-minute epoch feature row to the session's CSV file."""
+        if not self.is_active or not self.csv_path:
+            return
+
+        now_iso = datetime.now().isoformat()
+
+        def _val(d, key, default=""):
+            v = d.get(key, default)
+            return "" if v is None or (isinstance(v, float) and math.isnan(v)) else v
+
+        mdf_l = _val(spectral_left_dict, "mdf")
+        mdf_r = _val(spectral_right_dict, "mdf")
+
+        row = [
+            epoch_index,
+            now_iso,
+            round(elapsed_minutes, 2),
+            round(composite_score, 4) if composite_score is not None and not math.isnan(composite_score) else "",
+            _val(score_left_dict, "eindex_live"),
+            _val(score_right_dict, "eindex_live"),
+            _val(score_left_dict, "eindex_cumulative"),
+            _val(score_right_dict, "eindex_cumulative"),
+            _val(score_left_dict, "short_suma_penalty"),
+            _val(score_right_dict, "short_suma_penalty"),
+            _val(score_left_dict, "suma_count"),
+            _val(score_right_dict, "suma_count"),
+            _val(score_left_dict, "gap_frequency_per_min"),
+            _val(score_right_dict, "gap_frequency_per_min"),
+            _val(score_left_dict, "apdf_10"),
+            _val(score_left_dict, "apdf_50"),
+            _val(score_left_dict, "apdf_90"),
+            _val(score_right_dict, "apdf_10"),
+            _val(score_right_dict, "apdf_50"),
+            _val(score_right_dict, "apdf_90"),
+            round(asymmetry_index, 4) if asymmetry_index is not None and not math.isnan(asymmetry_index) else "",
+            "1" if asymmetry_penalty_applied else "0",
+            mdf_l,
+            _val(spectral_left_dict, "mnf"),
+            _val(spectral_left_dict, "slope_hz_per_min"),
+            "1" if mdf_l != "" else "0",  # mdf_computed_left explicit boolean
+            "1" if spectral_left_dict.get("is_fatiguing", False) else "0",
+            mdf_r,
+            _val(spectral_right_dict, "mnf"),
+            _val(spectral_right_dict, "slope_hz_per_min"),
+            "1" if mdf_r != "" else "0",  # mdf_computed_right explicit boolean
+            "1" if spectral_right_dict.get("is_fatiguing", False) else "0",
+        ]
+
+        try:
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+            print(f"[LocalLogger] Logged epoch #{epoch_index} ({elapsed_minutes:.1f} min) to {self.csv_path.name}")
+        except Exception as e:
+            print(f"Warning: Could not append row to features CSV: {e}")
+
+    def update_calibration(self, calibration_left: float, calibration_right: float):
+        """Updates the session metadata file when a live shrug calibration completes."""
+        if not self.is_active or not self.meta_path or not self.meta_path.exists():
+            return
+        try:
+            with open(self.meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["calibration_baselines_mv"] = {"left": calibration_left, "right": calibration_right}
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"Warning: Could not update calibration in metadata JSON: {e}")
+
+    def end_session(self):
+        """Marks the session as completed and updates end_time in metadata JSON."""
+        if not self.is_active or not self.meta_path or not self.meta_path.exists():
+            return
+        try:
+            with open(self.meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["end_time"] = datetime.now().isoformat()
+            data["status"] = "completed"
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            print(f"[LocalLogger] Session completed -> saved to {self.meta_path.name}")
+        except Exception as e:
+            print(f"Warning: Could not finalize metadata JSON: {e}")
+        finally:
+            self.is_active = False
