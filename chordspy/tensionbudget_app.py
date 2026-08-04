@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QPushButton, QLabel, QComboBox, QTabWidget, QFileDialog, QGroupBox,
     QGridLayout, QProgressBar, QMessageBox, QHeaderView, QTableWidget, QTableWidgetItem,
-    QLineEdit
+    QLineEdit, QDialog, QRadioButton, QButtonGroup
 )
 from PyQt5.QtCore import QTimer, Qt
 import pyqtgraph as pg
@@ -35,11 +35,73 @@ except ImportError:
 
 from chordspy.tensionbudget.config import TBConfig
 from chordspy.tensionbudget.local_logger import LocalSessionLogger
-from chordspy.tensionbudget.preprocessing import load_tb_csv, preprocess_channel
+from chordspy.tensionbudget.preprocessing import load_tb_csv, preprocess_channel, StreamingChannelProcessor
 from chordspy.tensionbudget.calibration import compute_reference_rms
 from chordspy.tensionbudget.scoring import score_bilateral_window, EIndexAccumulator
 from chordspy.tensionbudget.spectral import analyze_bilateral_spectral_fatigue
 from chordspy.tensionbudget.analytics import analyze_channel, compute_asymmetry
+
+
+class BorgStrainPopupDialog(QDialog):
+    def __init__(self, epoch_idx, elapsed_min, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"🎯 Epoch #{epoch_idx} Completed ({elapsed_min:.1f} min elapsed)")
+        self.setModal(True)
+        self.resize(520, 500)
+        self.selected_rating = None
+
+        layout = QVBoxLayout(self)
+        title_lbl = QLabel(
+            f"<b>Epoch #{epoch_idx} Complete ({elapsed_min:.1f} minutes)!</b><br>"
+            "Please rate your average perceived muscular strain over the past 5 minutes on the Borg CR-10 Scale:"
+        )
+        title_lbl.setStyleSheet("font-size: 13px; margin-bottom: 8px;")
+        layout.addWidget(title_lbl)
+
+        self.btn_group = QButtonGroup(self)
+        box = QGroupBox("0–10 Borg CR-10 Continuous Domain")
+        box_layout = QVBoxLayout(box)
+        
+        anchors = [
+            (0, "0 — Complete Rest (Nothing at all)"),
+            (1, "1 — Very weak (Just noticeable effort)"),
+            (2, "2 — Weak (Light effort)"),
+            (3, "3 — Moderate (Comfortable working level)"),
+            (4, "4 — Somewhat strong"),
+            (5, "5 — Strong (Heavy working fatigue)"),
+            (6, "6 — Very noticeable fatigue"),
+            (7, "7 — Very strong (Severe strain)"),
+            (8, "8 — Extremely strong (Near failure)"),
+            (9, "9 — Approaching maximum tolerance"),
+            (10, "10 — Absolute maximum (Intolerable pain/fatigue)")
+        ]
+        for idx, (val, text) in enumerate(anchors):
+            rb = QRadioButton(text)
+            if val == 0:
+                rb.setChecked(True)
+                self.selected_rating = 0.0
+            self.btn_group.addButton(rb, val)
+            box_layout.addWidget(rb)
+        layout.addWidget(box)
+
+        self.btn_group.idClicked.connect(lambda val_id: setattr(self, "selected_rating", float(val_id)))
+
+        btn_layout = QHBoxLayout()
+        btn_submit = QPushButton("✅ Submit Score ($y$)")
+        btn_submit.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold; padding: 8px 16px; font-size: 13px;")
+        btn_submit.clicked.connect(self.accept)
+
+        btn_skip = QPushButton("⏭️ Skip / Unreported (NULL)")
+        btn_skip.setStyleSheet("padding: 8px 16px; font-size: 13px;")
+        btn_skip.clicked.connect(self.skip_submission)
+
+        btn_layout.addWidget(btn_submit)
+        btn_layout.addWidget(btn_skip)
+        layout.addLayout(btn_layout)
+
+    def skip_submission(self):
+        self.selected_rating = None
+        self.reject()
 
 
 class TensionBudgetApp(QMainWindow):
@@ -96,6 +158,13 @@ class TensionBudgetApp(QMainWindow):
         self.session_sample_count = 0
         self.last_logged_window = 0
         self.loaded_csv_name = "Offline_CSV"
+        self.current_strain_rating = None
+
+        # Phase 12 Full-Epoch Spectral Accumulation (Pre-rectification Bandpass + Notch)
+        self.stream_proc_l = StreamingChannelProcessor(fs=self.sampling_rate, config=self.cfg)
+        self.stream_proc_r = StreamingChannelProcessor(fs=self.sampling_rate, config=self.cfg)
+        self.epoch_filt_l = []
+        self.epoch_filt_r = []
 
         # UI Setup
         self._init_ui()
@@ -174,6 +243,31 @@ class TensionBudgetApp(QMainWindow):
         
         ctrl_box.setLayout(ctrl_layout)
         main_layout.addWidget(ctrl_box)
+
+        # ── Subjective Strain (Borg CR-10) Target Variable Bar for Bayesian Hierarchy Models ──
+        strain_box = QGroupBox("Subjective Self-Report (Borg CR-10 / Bayesian Target Label $y$)")
+        strain_layout = QHBoxLayout()
+        strain_layout.addWidget(QLabel("Perceived Strain ($y$):"))
+        self.strain_combo = QComboBox()
+        self.strain_combo.addItem("[NULL] Unreported / Skip (strain_reported = 0)", None)
+        for val in range(int(TBConfig.STRAIN_SCALE_MIN), int(TBConfig.STRAIN_SCALE_MAX) + 1):
+            desc = TBConfig.STRAIN_TARGET_LABELS.get(val, str(val))
+            self.strain_combo.addItem(f"{val} — {desc.split('—')[-1].strip()}", float(val))
+        self.strain_combo.setStyleSheet("font-weight: bold; padding: 4px; border: 1px solid #777; border-radius: 4px;")
+        self.strain_combo.currentIndexChanged.connect(self.on_strain_changed)
+        strain_layout.addWidget(self.strain_combo, 1)
+
+        self.btn_log_strain_now = QPushButton("Log Strain Marker")
+        self.btn_log_strain_now.setStyleSheet("background-color: #5a3d77; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px;")
+        self.btn_log_strain_now.clicked.connect(self.on_manual_strain_log)
+        strain_layout.addWidget(self.btn_log_strain_now)
+
+        self.lbl_strain_status = QLabel("Target: NULL | strain_reported = 0")
+        self.lbl_strain_status.setStyleSheet("color: #4a235a; font-weight: bold; padding-left: 8px;")
+        strain_layout.addWidget(self.lbl_strain_status, 1)
+        
+        strain_box.setLayout(strain_layout)
+        main_layout.addWidget(strain_box)
 
         # ── Tabbed Views ──
         self.tabs = QTabWidget()
@@ -291,6 +385,22 @@ class TensionBudgetApp(QMainWindow):
                         )
             except Exception as e:
                 print(f"Notice: Failed to read existing calibration JSON: {e}")
+
+    def on_strain_changed(self, index):
+        val = self.strain_combo.currentData()
+        if val is not None and not (isinstance(val, float) and (math.isnan(val) or val < 0)):
+            self.current_strain_rating = float(val)
+            self.lbl_strain_status.setText(f"Target ($y$): {self.current_strain_rating:.1f} | strain_reported = 1 (Active)")
+        else:
+            self.current_strain_rating = None
+            self.lbl_strain_status.setText("Target ($y$): NULL | strain_reported = 0 (Unreported)")
+
+    def on_manual_strain_log(self):
+        if self.local_logger and self.local_logger.is_active:
+            self._log_current_epoch(epoch_idx=None, is_final=False)
+            self.lbl_strain_status.setText(f"✓ Saved Target ($y$ = {self.current_strain_rating}) to {self.local_logger.csv_path.name}")
+        else:
+            QMessageBox.information(self, "Session Offline", "Please start a recording or replay session to log target labels to CSV.")
 
     def on_source_changed(self, index):
         if self.stream_active:
@@ -419,6 +529,10 @@ class TensionBudgetApp(QMainWindow):
             )
             self.session_sample_count = 0
             self.last_logged_window = 0
+            self.stream_proc_l = StreamingChannelProcessor(fs=self.sampling_rate, config=self.cfg)
+            self.stream_proc_r = StreamingChannelProcessor(fs=self.sampling_rate, config=self.cfg)
+            self.epoch_filt_l = []
+            self.epoch_filt_r = []
             age_txt = f"{self.local_logger.age_years} yrs" if self.local_logger.age_years else "N/A"
             bmi_txt = f"{self.local_logger.bmi_value}" if self.local_logger.bmi_value else "N/A"
             self.lbl_profile_info.setText(f"Active Session — Subject: {self.local_logger.user_name} (Age: {age_txt}, BMI: {bmi_txt})")
@@ -440,7 +554,7 @@ class TensionBudgetApp(QMainWindow):
             return np.abs(signal_arr)
         kernel = np.ones(window_size) / window_size
         rms = np.sqrt(np.convolve(signal_arr**2, kernel, mode='valid'))
-        return np.pad(rms, (len(signal_arr) - len(rms), 0), 'constant')
+        return np.pad(rms, (len(signal_arr) - len(rms), 0), 'edge')
 
     def update_loop(self):
         if not self.stream_active:
@@ -480,13 +594,31 @@ class TensionBudgetApp(QMainWindow):
         if not chunk_l:
             return
 
-        # Advance sample counter and check 10-minute epoch boundaries
+        # Phase 12: Accumulate pre-rectification bandpass & notch filtered signal for epoch spectral regression
+        out_l = self.stream_proc_l.process_chunk(np.array(chunk_l))
+        out_r = self.stream_proc_r.process_chunk(np.array(chunk_r))
+        if "filtered" in out_l and len(out_l["filtered"]) > 0:
+            self.epoch_filt_l.extend(out_l["filtered"])
+        if "filtered" in out_r and len(out_r["filtered"]) > 0:
+            self.epoch_filt_r.extend(out_r["filtered"])
+        max_epoch_samples = int(self.sampling_rate * 300)
+        if len(self.epoch_filt_l) > max_epoch_samples:
+            del self.epoch_filt_l[:-max_epoch_samples]
+        if len(self.epoch_filt_r) > max_epoch_samples:
+            del self.epoch_filt_r[:-max_epoch_samples]
+
+        # Stream raw telemetry directly to disk buffer before incrementing counter
+        if self.local_logger and self.local_logger.is_active and hasattr(self, "session_sample_count"):
+            curr_epoch_idx = int(self.session_sample_count // (self.sampling_rate * 300)) + 1
+            self.local_logger.log_raw_chunk(chunk_l, chunk_r, self.session_sample_count, self.sampling_rate, curr_epoch_idx)
+
+        # Advance sample counter and check 5-minute epoch boundaries (300 seconds)
         self.session_sample_count += len(chunk_l)
         if self.local_logger and self.local_logger.is_active:
-            epoch_idx = int(self.session_sample_count // (self.sampling_rate * 600))
+            epoch_idx = int(self.session_sample_count // (self.sampling_rate * 300))
             if epoch_idx > self.last_logged_window and hasattr(self, "last_score_res"):
                 self.last_logged_window = epoch_idx
-                self._log_current_epoch(epoch_idx=epoch_idx, is_final=False)
+                self._trigger_epoch_logging(epoch_idx=epoch_idx, is_final=False)
 
         # 2. Update Calibration buffer if active
         if self.is_calibrating:
@@ -585,6 +717,8 @@ class TensionBudgetApp(QMainWindow):
             self.last_res_l = res_l
             self.last_res_r = res_r
             self.last_spec_res = spec_res
+            self.last_sub_norm_l = sub_norm_l
+            self.last_sub_norm_r = sub_norm_r
 
             # Update labels
             c_score = score_res.get('composite', {}).get('composite_score', 0.0)
@@ -625,18 +759,29 @@ class TensionBudgetApp(QMainWindow):
             return
         elapsed_min = (self.session_sample_count / max(1, self.sampling_rate)) / 60.0
         if epoch_idx is None:
-            epoch_idx = int(self.last_logged_window + 1) if is_final and elapsed_min > (self.last_logged_window * 10) else self.last_logged_window
+            epoch_idx = int(self.last_logged_window + 1) if is_final and elapsed_min > (self.last_logged_window * 5) else self.last_logged_window
             if epoch_idx == 0:
                 epoch_idx = 1
+
+        if hasattr(self, "last_sub_norm_l") and hasattr(self, "last_sub_norm_r"):
+            if not is_final or (epoch_idx > self.last_logged_window) or (getattr(self.accumulator_l, "completed_windows", 0) == 0):
+                self.accumulator_l.submit_completed_window(self.last_sub_norm_l)
+                self.accumulator_r.submit_completed_window(self.last_sub_norm_r)
 
         score_res = getattr(self, "last_score_res", {})
         res_l = getattr(self, "last_res_l", {})
         res_r = getattr(self, "last_res_r", {})
-        spec_res = getattr(self, "last_spec_res", {})
+        if hasattr(self, "epoch_filt_l") and len(self.epoch_filt_l) >= 256 and hasattr(self, "epoch_filt_r") and len(self.epoch_filt_r) >= 256:
+            spec_res = analyze_bilateral_spectral_fatigue(
+                np.array(self.epoch_filt_l), np.array(self.epoch_filt_r),
+                fs=self.sampling_rate, config=self.cfg
+            )
+        else:
+            spec_res = getattr(self, "last_spec_res", {})
 
         score_left_dict = {
             "eindex_live": score_res.get("eindex_live_left", 0.0),
-            "eindex_cumulative": getattr(self.accumulator_l, "total_eindex", 0.0),
+            "eindex_cumulative": getattr(self.accumulator_l, "eindex_session_cumulative", 0.0),
             "short_suma_penalty": score_res.get("short_suma_penalty_left", 0.0),
             "suma_count": sum(res_l.get("suma_bins", {}).values()) if isinstance(res_l.get("suma_bins"), dict) else 0,
             "gap_frequency_per_min": res_l.get("gaps_count", 0) / max(0.1, elapsed_min),
@@ -646,7 +791,7 @@ class TensionBudgetApp(QMainWindow):
         }
         score_right_dict = {
             "eindex_live": score_res.get("eindex_live_right", 0.0),
-            "eindex_cumulative": getattr(self.accumulator_r, "total_eindex", 0.0),
+            "eindex_cumulative": getattr(self.accumulator_r, "eindex_session_cumulative", 0.0),
             "short_suma_penalty": score_res.get("short_suma_penalty_right", 0.0),
             "suma_count": sum(res_r.get("suma_bins", {}).values()) if isinstance(res_r.get("suma_bins"), dict) else 0,
             "gap_frequency_per_min": res_r.get("gaps_count", 0) / max(0.1, elapsed_min),
@@ -664,8 +809,33 @@ class TensionBudgetApp(QMainWindow):
             spectral_left_dict=spec_res.get("left", {}),
             spectral_right_dict=spec_res.get("right", {}),
             asymmetry_index=score_res.get("asymmetry_index", 0.0),
-            asymmetry_penalty_applied=abs(score_res.get("asymmetry_index", 0.0)) > 0.5
+            asymmetry_penalty_applied=abs(score_res.get("asymmetry_index", 0.0)) > 0.5,
+            subjective_strain_cr10=getattr(self, "current_strain_rating", None)
         )
+        if hasattr(self, "epoch_filt_l"):
+            self.epoch_filt_l.clear()
+        if hasattr(self, "epoch_filt_r"):
+            self.epoch_filt_r.clear()
+
+    def _trigger_epoch_logging(self, epoch_idx=None, is_final=False):
+        elapsed_min = (self.session_sample_count / max(1, self.sampling_rate)) / 60.0
+        # Prompt interactive modal popup during live runs without blocking signal processing thread
+        if self.isVisible() and self.mode == "live" and not os.getenv("TB_HEADLESS") and not is_final:
+            dialog = BorgStrainPopupDialog(epoch_idx=epoch_idx or self.last_logged_window, elapsed_min=elapsed_min, parent=self)
+            dialog.open(lambda: self._on_borg_popup_finished(dialog, epoch_idx))
+        else:
+            self._log_current_epoch(epoch_idx=epoch_idx, is_final=is_final)
+
+    def _on_borg_popup_finished(self, dialog, epoch_idx):
+        self.current_strain_rating = dialog.selected_rating
+        self._log_current_epoch(epoch_idx=epoch_idx, is_final=False)
+        # Record sparse target event into high-frequency raw telemetry stream
+        if self.local_logger and self.local_logger.is_active and self.current_strain_rating is not None:
+            self.local_logger.log_raw_strain_event(self.session_sample_count, self.sampling_rate, epoch_idx, self.current_strain_rating)
+        # Reset rating to NULL after logging so future epochs require explicit evaluation
+        self.current_strain_rating = None
+        if hasattr(self, "strain_combo"):
+            self.strain_combo.setCurrentIndex(0)
 
 
 def main():

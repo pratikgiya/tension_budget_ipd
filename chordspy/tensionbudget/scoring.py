@@ -40,11 +40,11 @@ EIndex split (fixes unbounded-growth bug, verified via simulation):
           report-card statistic, not a live signal.
         - Used for end-of-session reporting and literature comparison only.
 
-STAMI mapping:
-    The EIndex→0-100 display scale requires anchoring against the
-    STAMI S6 dataset (Section 5.2 of the project's dataset review).
-    This dataset check has not been completed. The mapping is stubbed
-    with NotImplementedError — do not guess a scale factor.
+STAMI mapping (eindex_session_cumulative only):
+    The EIndex→0-100 display scale is anchored against the STAMI S1_Dataset.sav
+    (SPSS format, Section 5.2 of the project's dataset review). This mapping applies
+    EXCLUSIVELY to eindex_session_cumulative (full-workday exposure accumulation).
+    Do NOT apply to eindex_live, per-side scores, or composite_score.
 """
 
 import numpy as np
@@ -383,32 +383,35 @@ class EIndexAccumulator:
         return self._completed_window_count
 
 
-# ── 5. STAMI display-scale mapping (STUBBED) ─────────────────────────
+# ── 5. STAMI display-scale mapping (eindex_session_cumulative only) ──
 
-def map_eindex_to_display_scale(eindex_value):
+def map_eindex_to_display_scale(cumulative_eindex, floor=None, ceil=None, config=None):
     """
-    Map the raw EIndex value to a 0–100 display scale for UI.
+    Maps eindex_session_cumulative onto a [0,100] display scale, anchored
+    to the 5th/95th percentile of Koch et al. 2024's 731-subject STAMI
+    pooled dataset (S1_Dataset.sav).
 
-    NOT IMPLEMENTED — requires anchoring against the STAMI S6 dataset
-    (Section 5.2 of the project's dataset review) to determine appropriate
-    scale endpoints. Using a guessed mapping would produce a display score
-    that appears precise but is not grounded in reference data.
+    IMPORTANT — labeling requirement: this is a population REFERENCE for
+    display calibration only. It is NOT a validation of TensionBudget's
+    own scoring methodology (EIndex + short-SUMA frequency term + fusion +
+    asymmetry penalty), which has no equivalent in the STAMI dataset.
+    Actual methodology validation comes from this project's own pilot
+    study (self-report correlation), not from this mapping.
 
-    When the STAMI dataset check is completed, implement the mapping here
-    based on the empirical distribution of EIndex values in that dataset,
-    replacing this stub with the actual linear/sigmoid/percentile transform.
-
-    Args:
-        eindex_value: float in [-2, +2] or composite score.
-
-    Raises:
-        NotImplementedError: Always, until the STAMI dataset is reviewed.
+    Only valid for eindex_session_cumulative. Do not apply to eindex_live,
+    per-side scores, or composite_score — those are point-in-time
+    snapshots, not comparable to STAMI's full-workday cumulative values.
     """
-    raise NotImplementedError(
-        "EIndex → display-scale mapping not yet implemented. "
-        "Requires STAMI S6 dataset review (Section 5.2) to anchor "
-        "scale endpoints. Do not guess this mapping."
-    )
+    cfg = config or TBConfig
+    if floor is None:
+        floor = cfg.EI_FLOOR
+    if ceil is None:
+        ceil = cfg.EI_CEIL
+
+    if ceil == floor:
+        return 0.0
+    normalized = ((cumulative_eindex - floor) / (ceil - floor)) * 100.0
+    return float(np.clip(normalized, 0.0, 100.0))
 
 
 # ── 6. Full scoring pass (convenience wrapper) ────────────────────────

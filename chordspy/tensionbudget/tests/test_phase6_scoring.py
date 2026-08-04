@@ -572,15 +572,52 @@ class TestEightHourRegression:
         )
 
 
-# ── 7. STAMI stub ──────────────────────────────────────────────────────
+# ── 7. STAMI display-scale mapping ──────────────────────────────────────
 
-class TestStamiStub:
+class TestStamiMapping:
 
-    def test_stami_raises_not_implemented(self):
+    def test_stami_mapping_endpoints(self):
         """
-        map_eindex_to_display_scale must raise NotImplementedError.
-        The STAMI S6 dataset review is not yet complete — do not guess
-        a scale mapping.
+        map_eindex_to_display_scale maps eindex_session_cumulative to [0, 100]
+        anchored to STAMI S1_Dataset.sav 5th (-3.854) and 95th (49.635) percentiles.
         """
-        with pytest.raises(NotImplementedError):
-            map_eindex_to_display_scale(1.6)
+        assert map_eindex_to_display_scale(-3.854) == pytest.approx(0.0, abs=1e-3)
+        assert map_eindex_to_display_scale(49.635) == pytest.approx(100.0, abs=1e-3)
+        assert map_eindex_to_display_scale((49.635 + (-3.854)) / 2.0) == pytest.approx(50.0, abs=1e-3)
+
+    def test_stami_mapping_clipping_and_edge_cases(self):
+        """
+        Values outside [EI_FLOOR, EI_CEIL] must be cleanly clipped to 0.0 and 100.0.
+        Equal floor and ceil must return 0.0 without zero division.
+        """
+        assert map_eindex_to_display_scale(-50.0) == 0.0
+        assert map_eindex_to_display_scale(150.0) == 100.0
+        assert map_eindex_to_display_scale(25.0, floor=10.0, ceil=10.0) == 0.0
+
+    def test_structural_guard_no_live_or_composite_mapping(self):
+        """
+        Structural guard against scale mismatch bugs: map_eindex_to_display_scale()
+        is strictly scoped to eindex_session_cumulative (full-workday cumulative value).
+        It must NEVER be called on eindex_live, per-side scores, or composite_score
+        anywhere in the codebase.
+        """
+        import os
+
+        chordspy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        forbidden_keywords = ['live', 'composite', 'per_side', 'score_l', 'score_r']
+
+        for root, dirs, files in os.walk(chordspy_root):
+            for file in files:
+                if file.endswith('.py') and not file.startswith('test_'):
+                    filepath = os.path.join(root, file)
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    for idx, line in enumerate(lines, 1):
+                        if 'map_eindex_to_display_scale(' in line and 'def map_eindex_to_display_scale' not in line:
+                            line_lower = line.lower()
+                            for bad_kw in forbidden_keywords:
+                                assert bad_kw not in line_lower, (
+                                    f"Scale violation in {file}:{idx}: map_eindex_to_display_scale() "
+                                    f"was called with forbidden argument/keyword '{bad_kw}'. "
+                                    f"STAMI display mapping applies exclusively to eindex_session_cumulative."
+                                )

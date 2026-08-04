@@ -22,9 +22,9 @@ Welcome to the **TensionBudget Bilateral sEMG Ergonomic Surveillance & Machine L
 
 TensionBudget is built around two foundational physiological guidelines:
 * **Zero DSP Rewrite & Verified Engineering**: Digital signal processing (20–240 Hz bandpass filtering, moving root-mean-square extraction, Welch's median power frequency estimation) runs through verified NumPy and SciPy modules in `chordspy.tensionbudget`.
-* **The Two-Clock Principle**: 
-  * **Clock 1 (In-Memory Live Engine)**: Processes 500 Hz sEMG streams entirely in RAM to power real-time graphical displays at 50 Hz refresh rates. Raw high-speed signal data is discarded when the window closes to conserve disk and network bandwidth.
-  * **Clock 2 (10-Minute Discrete Summary Logger)**: Exactly once every 10 minutes of elapsed working duration (and upon session completion), a 30+ column feature vector is computed and deposited into an automated local CSV directory (`output_logs/`), formatted for automated ingestion into PostgreSQL machine learning models.
+* **The Two-Clock Principle & Hybrid Telemetry**: 
+  * **Clock 1 (High-Frequency Live Stream & Raw Vault)**: Processes 500 Hz sEMG streams in RAM to power real-time graphical displays at 50 Hz refresh rates while simultaneously buffering and streaming raw millivolt telemetry directly to disk (`_raw.csv`) with relational `epoch_index` binding for deep waveform modeling and Bayesian priors.
+  * **Clock 2 (5-Minute Discrete Summary & Target Logger)**: Exactly once every 5 minutes of elapsed working duration (300 seconds), a 38-column feature vector is computed and deposited into a dedicated session subdirectory under `output_logs/`, accompanied by an interactive **Borg CR-10 Popup Modal** to capture precise perceived muscular strain ($y$) without thread blocking or stale defaults.
 
 ---
 
@@ -101,8 +101,8 @@ Because dual USB serial microcontrollers operate on distinct COM ports, we use a
 ```powershell
 python start_lsl_stream.py
 ```
-* **What this does**: Automatically opens **COM5** (Left Channel at 500 Hz, frame terminator `0x01`) and **COM6** (Right Channel at 250 Hz, frame terminator `0x0D`), supersamples the Right stream to match 500 Hz via linear interpolation, and publishes a synchronized 2-channel bilateral stream named `'Chords_Bilateral_Trapezius'`.
-* *(Note: If your computers assign different port numbers, open `start_lsl_stream.py` in a text editor and adjust `PORT_L = 'COM5'` and `PORT_R = 'COM6'` to match your Device Manager).*
+* **What this does**: Automatically connects to **COM6** (Left Trapezius, Pin A2 @ 230,400 baud) and **COM5** (Right Trapezius, Pin A2 @ 230,400 baud), handshakes binary packet streaming without Win32 driver buffer locks, and broadcasts a synchronized 500 Hz 2-channel bilateral stream named `'Chords_EMG_Bilateral'`.
+* *(Note: If your Windows Device Manager assigns different COM ports, open `start_lsl_stream.py` and modify `PORT_L = 'COM6'` and `PORT_R = 'COM5'` to match your setup).*
 
 #### Step 2: Connect to the LSL Stream in the App (Terminal 2)
 1. In a second terminal window, launch the application: `python chordspy/tensionbudget_app.py`.
@@ -123,20 +123,24 @@ Electrical impedance, skin moisture, and electrode placement vary across individ
 
 ---
 
-## 4. The Automated Local Logging Vault (`output_logs/`)
+## 4. The Automated Local Logging Vault & Session Folders (`output_logs/`)
 
-As you stream live hardware data or run offline replays, the logger records data inside your workspace root:
+As you stream live hardware data or run offline replays, the logger records all telemetry inside isolated, self-contained **Session Folders**:
 ```
 output_logs/
-  └── Mohit_K/                                 <-- Subject's dedicated research folder
-        ├── user_profile.json                  <-- Preserves DOB, Sex, Weight, Height & calculated BMI
-        ├── session_20260801_1030_metadata.json<-- Keeps start/end timestamps & Shrug Calibration baselines (mV)
-        └── session_20260801_1030_features.csv <-- Wide-format feature table logged every 10 minutes!
+  └── Mohit_K/                                      <-- Subject's dedicated research vault
+        ├── user_profile.json                       <-- Preserves DOB, Sex, Weight, Height & dynamic BMI
+        └── session_20260804_130742/                <-- NEW Dedicated session directory per recording
+              ├── session_metadata.json             <-- Keeps timestamps, user snapshot & calibration baselines (mV)
+              ├── session_features.csv              <-- Clock 2 (38 columns, 5-minute epoch summary vector)
+              └── session_raw.csv                   <-- Clock 1 (500 Hz high-frequency raw telemetry stream)
 ```
 
 ### Why is this folder structured this way?
-* **Machine Learning Readiness**: The `_features.csv` table formats data into a 30+ column wide-tabular layout matching our PostgreSQL cloud database specification. Every row is one 10-minute observation. Columns include EIndex exposure ratings, SUMA counts, Amplitude Probability Distribution Function (APDF 10/50/90) levels, laterality asymmetry index, median/mean power frequencies (MDF/MNF), and explicit missingness indicators (`mdf_computed_left/right`).
-* **Easy Database Ingestion**: When you are ready to upload local historical experiments to a cloud database, these CSV files can be directly ingested into PostgreSQL tables or Pandas dataframes via simple bulk import commands with zero reformatting required.
+* **Relational `epoch_index` Binding & Raw Integrity**: The high-frequency raw telemetry file (`_raw.csv`) logs every individual 500 Hz waveform sample with an explicit `epoch_index` column. This renders downstream analysis completely immune to sample-rate jitters or temporary serial packet drops—researchers can effortlessly join dense high-frequency waveforms to sparse 5-minute feature targets in PyTorch or PostgreSQL (`SELECT * FROM raw JOIN features USING (epoch_index)`).
+* **Interactive Borg CR-10 Popup Modal**: To prevent forgotten self-reports or stale forward-filling, a non-blocking dialog pops up at every 5-minute epoch mark prompting the user for their perceived muscular strain on the continuous `0.0–10.0` Borg CR-10 scale. Submitting a score logs it into `session_features.csv` and stamps a sparse event marker directly onto that exact timestamp in `session_raw.csv`.
+* **Explicit Missingness Flags**: Unrecorded or skipped ratings are recorded with `strain_reported = 0` and empty strings `""` (SQL `NULL`), eliminating `-1.0` sentinel distortion from Bayesian Hierarchical Model priors.
+* **Automated Cloud DB Synchronization**: Upon session completion, `sync_logs_to_postgres` recursively discovers metadata and feature tables across all session folders and idempotently upserts them into cloud PostgreSQL / Supabase databases.
 
 ---
 
@@ -165,5 +169,7 @@ If you need to generate test files of varying lengths or simulated workload cond
    * Verify that your hardware bridge script (`python start_lsl_stream.py`) is actively running without serial exceptions in Terminal 1 before pressing **[Connect LSL Stream]** in Terminal 2.
 3. **Serial port access denied or COM port errors in `start_lsl_stream.py`**
    * Open Device Manager (Windows) to identify which COM ports are assigned to your two Arduino UNO R4 Minimas. Ensure no other applications (like Arduino IDE Serial Monitor or BrainVision LSL Viewer) are keeping those ports open. Edit `PORT_L` and `PORT_R` inside `start_lsl_stream.py` to match your confirmed COM port numbers.
-4. **Why isn't my raw 500 Hz signal being saved into `output_logs/`?**
-   * This is deliberate design under our **Two-Clock Principle**. Saving uncompressed 500 Hz raw multichannel arrays would rapidly consume gigabytes of storage during all-day workstation monitoring. The app extracts all diagnostic ergonomic features in memory every 10 minutes and discards the raw electrical waveform when the window closes to keep lightweight file logs.
+4. **Why is my Left channel reading high percentages like $>300\%$ RVE?**
+   * This indicates either an uncalibrated session using stale baselines from another person or temporary skin-electrode impedance before natural perspiration settles. Always switch to **Tab 3** after connecting and click **Start 5-Second Shrug Calibration Hold** so your current electrode placement is scaled properly!
+5. **Where can I find the raw 500 Hz high-frequency waveforms?**
+   * Inside your session folder under `output_logs/<your_name>/session_<timestamp>/session_<timestamp>_raw.csv`! Every single sample is buffered and flushed directly to disk once per second without locking the UI or RAM.

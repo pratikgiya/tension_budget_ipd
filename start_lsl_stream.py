@@ -56,16 +56,28 @@ packet_counters = {"left": 0, "right": 0}
 
 
 def connect_board(port: str) -> serial.Serial | None:
-    """Connect to an Arduino on the specified port, auto-detecting baudrate."""
+    """Connect to an Arduino on the specified port, auto-detecting baudrate or active binary stream."""
     for baud in BAUDRATES:
         try:
-            ser = serial.Serial(port, baudrate=baud, timeout=1.5)
+            ser = serial.Serial(port, baudrate=baud, timeout=1.0)
             # Give Arduino Uno R4 bootloader 1.5 seconds to settle after USB serial open reset
             time.sleep(1.5)
-            ser.flushInput()
-            ser.flushOutput()
-            for _ in range(4):
-                ser.write(b"WHORU\n")
+            try:
+                ser.flushInput()
+                ser.flushOutput()
+            except Exception:
+                pass  # Ignore Win32 CDC buffer clearing errors on virtual USB ports
+            # 1. Check if the board is already actively broadcasting raw C7 7C binary EMG packets
+            raw_test = ser.read(40)
+            if bytes([SYNC1, SYNC2]) in raw_test:
+                print(f"  ✓ Connected to active Chords EMG binary stream on {port} (@ {baud} baud)")
+                return ser
+            # 2. Otherwise, attempt text-based WHORU handshake
+            for _ in range(3):
+                try:
+                    ser.write(b"WHORU\n")
+                except Exception:
+                    pass
                 time.sleep(0.1)
                 resp = ser.readline().strip().decode(errors="ignore")
                 if resp in SUPPORTED_BOARDS:
@@ -79,13 +91,8 @@ def connect_board(port: str) -> serial.Serial | None:
 
 
 def reader_thread(ser: serial.Serial, side: str, push_lsl: bool, outlet: StreamOutlet = None):
-    """Background worker thread that constantly reads packets from one Arduino."""
+    """Background worker thread that constantly reads packets from one Arduino without triggering Win32 ClearCommErrors."""
     global latest_samples, running, packet_counters
-
-    ser.flushInput()
-    ser.flushOutput()
-    ser.write(b"START\n")
-    time.sleep(0.1)
 
     buf = bytearray()
     last_start_attempt = time.time()
@@ -94,14 +101,21 @@ def reader_thread(ser: serial.Serial, side: str, push_lsl: bool, outlet: StreamO
 
     try:
         while running:
-            # If we haven't received any valid packets yet, periodically resend START command and print diagnostics
+            # If we haven't received any valid packets yet, periodically attempt START command inside a safe block
             if not stream_started and time.time() - last_diag_print > 3.0:
-                print(f"\n[DIAGNOSTIC - {side.upper()} ({ser.port})] Waiting for initial packets... Raw bytes waiting: {ser.in_waiting}")
-                ser.write(b"START\n")
+                print(f"\n[DIAGNOSTIC - {side.upper()} ({ser.port})] Waiting for initial packets... Raw bytes waiting: {getattr(ser, 'in_waiting', 0)}")
+                try:
+                    ser.write(b"START\n")
+                except Exception:
+                    pass  # Prevent Win32 driver exceptions if device doesn't support command writes while streaming
                 last_diag_print = time.time()
                 last_start_attempt = time.time()
 
-            raw = ser.read(ser.in_waiting or 1)
+            try:
+                waiting = ser.in_waiting or 1
+            except Exception:
+                waiting = 1
+            raw = ser.read(waiting)
             if not raw:
                 continue
             buf.extend(raw)
@@ -147,6 +161,9 @@ def reader_thread(ser: serial.Serial, side: str, push_lsl: bool, outlet: StreamO
     finally:
         try:
             ser.write(b"STOP\n")
+        except Exception:
+            pass
+        try:
             ser.close()
         except Exception:
             pass
@@ -165,7 +182,7 @@ def main():
 
     if not ser_left or not ser_right:
         print("\n❌ Could not connect to BOTH Arduinos.")
-        print(f"   Check your USB connections: COM6 and COM7 must be accessible.")
+        print(f"   Check your USB connections: {LEFT_PORT} and {RIGHT_PORT} must be accessible.")
         if ser_left: ser_left.close()
         if ser_right: ser_right.close()
         sys.exit(1)

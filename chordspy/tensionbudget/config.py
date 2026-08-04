@@ -34,7 +34,7 @@ class TBConfig:
     #
     # Hardware-confirmed dual-Arduino setup:
     #   Left Arduino (COM6) pin A2  → LSL channel 0 ("Channel1" in CSV)
-    #   Right Arduino (COM7) pin A2 → LSL channel 1 ("Channel2" in CSV)
+    #   Right Arduino (COM5) pin A2 → LSL channel 1 ("Channel2" in CSV)
     CHANNEL_MAP = {"left": 0, "right": 1}  # type: dict[str, int] | None
 
     # Channels not in CHANNEL_MAP are flagged as unused/floating in the manifest.
@@ -111,15 +111,26 @@ class TBConfig:
     # so 3.0 - 5.0 = -2.0 → always clamped to 0. Every trigger would zero the
     # composite regardless of actual load — a verified bug.
     #
-    # ⚠️ RESCALING REQUIRED when map_eindex_to_display_scale() is implemented:
-    # Once STAMI mapping transforms per-side scores to 0-100, the penalty
-    # should revert to 5.0 (or be re-derived from the mapped output range).
-    # Update this constant and its unit test at that time.
+    # Note: ASYMMETRY_PENALTY_POINTS remains fixed at 0.25 for the live/composite
+    # path ([-2, +3] scale). STAMI mapping applies ONLY to eindex_session_cumulative,
+    # and does NOT touch per-side scores or the composite score at all.
     ASYMMETRY_PENALTY_POINTS = 0.25     # 5% of 5-unit [-2,+3] output range
 
     # Fusion rule: "worst_side" = min(Score_L, Score_R)
     # This is locked — do not change without updating scoring.py logic.
     FUSION_RULE = "worst_side"
+
+    # ── STAMI S1_Dataset.sav Cumulative Display-Scale Mapping ──────────
+    # Anchored to the 5th/95th percentile of Koch et al. 2024's 731-subject STAMI
+    # pooled dataset (S1_Dataset.sav, SPSS format).
+    # NOTE ON /100 PERCENTAGE-SCALE CORRECTION:
+    # STAMI's stored proportions are on a 0-100 percentage scale, not 0-1 fractions.
+    # Applying our EI formula (-2*P_Rest + P_Low + 2*P_High) to raw STAMI data
+    # produces values 100x too large. Do not re-derive from raw file values without
+    # applying this /100 division (verified via top-5 subject per-window averages and
+    # full population RRT distributions).
+    EI_FLOOR: float = -3.854            # STAMI S1_Dataset.sav, 5th pctile, corrected /100 (was -385.3945 raw)
+    EI_CEIL: float = 49.635             # STAMI S1_Dataset.sav, 95th pctile, corrected /100 (was 4963.4760 raw)
 
     # ── Stage 10: Spectral Fatigue (MDF/MNF) ──────────────────────────
 
@@ -172,6 +183,26 @@ class TBConfig:
     CALIBRATION_DURATION_S = 5.0        # Duration of reference contraction capture
 
     CALIBRATION_TYPE = "RVE"            # "RVE" (Reference Voluntary Exertion) or "MVC"
+
+    # ── Subjective Self-Reporting (Borg CR-10 Scale for Bayesian Hierarchical ML) ──
+    # Full continuous-feeling 0-10 resolution for ordinal regression and Bayesian priors.
+    # Missing data is represented by None (NULL in SQL / empty string in CSV) paired with
+    # an explicit boolean flag `strain_reported`, NEVER a sentinel number like -1.
+    STRAIN_SCALE_MIN = 0.0
+    STRAIN_SCALE_MAX = 10.0
+    STRAIN_TARGET_LABELS = {
+        0: "0 — Nothing at all (Complete Rest)",
+        1: "1 — Very weak (Just noticeable effort)",
+        2: "2 — Weak (Light effort)",
+        3: "3 — Moderate (Comfortable working level)",
+        4: "4 — Somewhat strong",
+        5: "5 — Strong (Heavy working fatigue)",
+        6: "6 — Very noticeable fatigue",
+        7: "7 — Very strong (Severe strain)",
+        8: "8 — Extremely strong (Near failure)",
+        9: "9 — Approaching maximum tolerance",
+        10: "10 — Absolute maximum (Intolerable pain/fatigue)"
+    }
 
     # ── Derived helpers ───────────────────────────────────────────────
 

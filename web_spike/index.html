@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TensionBudget Web Serial & Pyodide Wasm Bridge (Phase W1)</title>
+  <meta name="description" content="Phase W1 verification spike demonstrating real-time browser Web Serial dual Arduino acquisition and unmodified Python SciPy digital signal processing inside Pyodide WebAssembly with sub-10ms latency.">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <header>
+    <div class="brand-section">
+      <h1>⚡ TensionBudget Wasm Bridge</h1>
+      <p class="brand-subtitle">Phase W1: Web Serial Dual Arduino & Pyodide Digital Signal Processing Spike</p>
+    </div>
+    <div class="status-puck" id="status-puck">
+      <span class="pulse-dot" id="status-dot"></span>
+      <span id="status-label">Wasm Engine Booting...</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Web Serial Dual-Port Hardware Interface Deck -->
+    <section class="glass-panel" id="deck-hardware">
+      <div class="panel-header">
+        <h2 class="panel-title">🔌 Dual Arduino Web Serial Gateways</h2>
+        <span class="badge badge-cyan">500 Hz USB Stream</span>
+      </div>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.2rem; line-height: 1.5;">
+        Connect directly to dual hardware serial ports (COM6 Left / COM5 Right equivalents) or activate the built-in high-frequency hardware emulator to generate realistic 0xC7 0x7C telemetry packets.
+      </p>
+      <div class="button-group">
+        <button id="btn-connect-left" class="btn-neon btn-cyan">Link Left Port (COM6)</button>
+        <button id="btn-connect-right" class="btn-neon btn-cyan">Link Right Port (COM5)</button>
+        <button id="btn-simulate-stream" class="btn-neon btn-emerald" disabled>▶ Start Live 500Hz Stream</button>
+        <button id="btn-stop-stream" class="btn-neon btn-disabled" disabled>■ Stop Stream</button>
+      </div>
+      <div class="telemetry-grid">
+        <div class="stat-card">
+          <div class="stat-label">Left Packets (500Hz)</div>
+          <div class="stat-value cyan" id="val-packets-l">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Right Packets (500Hz)</div>
+          <div class="stat-value purple" id="val-packets-r">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Stream Status</div>
+          <div class="stat-value emerald" id="val-stream-status">READY</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Pyodide Wasm DSP Execution Deck -->
+    <section class="glass-panel" id="deck-dsp-engine">
+      <div class="panel-header">
+        <h2 class="panel-title">🧠 Pyodide Wasm DSP Runtime</h2>
+        <span class="badge badge-purple">NumPy + SciPy SOS</span>
+      </div>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.2rem; line-height: 1.5;">
+        Runs exact Python math from <code>preprocessing.py</code> (Second-Order Butterworth Bandpass 20–240Hz & Notch filtering) directly within browser RAM. Zero raw signal network upload.
+      </p>
+      <div class="telemetry-grid">
+        <div class="stat-card">
+          <div class="stat-label">Live Roundtrip Latency</div>
+          <div class="stat-value cyan" id="val-live-latency">0.0 ms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Samples Processed</div>
+          <div class="stat-value purple" id="val-samples-proc">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">SLA (< 10ms Target)</div>
+          <div class="stat-value emerald" id="val-sla-status">PASSING</div>
+        </div>
+      </div>
+      <div id="terminal-container">
+        <div class="log-terminal" id="log-terminal">
+          [System Initialization] Initializing WebAssembly Pyodide runtime...
+        </div>
+      </div>
+    </section>
+
+    <!-- Subjective Self-Report (Borg CR-10 Target Variable for Bayesian Hierarchical Modeling) -->
+    <section class="glass-panel full-width" id="deck-self-report" style="border: 1px solid var(--neon-purple);">
+      <div class="panel-header">
+        <h2 class="panel-title">🎯 Subjective Self-Report (Borg CR-10 / Bayesian Target Variable $y$)</h2>
+        <span class="badge badge-purple" id="val-target-badge">Target Label ($y$): NULL (strain_reported = 0)</span>
+      </div>
+      <div style="margin-top: 0.8rem; font-family: var(--font-body); color: var(--text-secondary); font-size: 0.9rem;">
+        Full continuous 0–10 Borg CR-10 spectrum for high-resolution ordinal regression & Bayesian hierarchical modeling. Unreported epochs trigger explicit boolean flag <code>strain_reported = 0</code> (NULL value) to prevent default-sentinel distortion:
+      </div>
+      <div style="margin-top: 1.2rem; display: flex; flex-direction: column; gap: 0.8rem; background: rgba(0,0,0,0.25); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="color: var(--neon-cyan); font-weight: 600; font-size: 1rem;">Continuous Strain Slider (0.0 — 10.0):</span>
+          <span id="lbl-slider-preview" style="font-family: var(--font-mono); color: var(--neon-purple); font-size: 1.1rem; font-weight: bold;">[NULL] (Unreported)</span>
+        </div>
+        <input type="range" id="rng-strain-slider" min="0" max="10" step="0.5" value="0" disabled style="width: 100%; cursor: pointer; accent-color: #bc13fe; margin-top: 0.4rem;">
+        <div style="display: flex; justify-content: space-between; color: #888; font-size: 0.75rem; font-family: var(--font-mono);">
+          <span>0 (Rest)</span>
+          <span>1 (Very Weak)</span>
+          <span>3 (Moderate)</span>
+          <span>5 (Strong)</span>
+          <span>7 (Very Strong)</span>
+          <span>10 (Absolute Max)</span>
+        </div>
+      </div>
+      <div class="button-group" style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-start;">
+        <button id="btn-strain-null" class="btn-neon btn-disabled" style="border-color: #ff3366; color: #ff3366; font-size: 0.8rem; padding: 6px 12px;">[NULL] Unreported / Skip (Flag 0)</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="0" style="flex: 1; min-width: 55px; font-size: 0.85rem;">0</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="1" style="flex: 1; min-width: 55px; font-size: 0.85rem;">1</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="2" style="flex: 1; min-width: 55px; font-size: 0.85rem;">2</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="3" style="flex: 1; min-width: 55px; font-size: 0.85rem;">3</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="4" style="flex: 1; min-width: 55px; font-size: 0.85rem;">4</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="5" style="flex: 1; min-width: 55px; font-size: 0.85rem;">5</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="6" style="flex: 1; min-width: 55px; font-size: 0.85rem;">6</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="7" style="flex: 1; min-width: 55px; font-size: 0.85rem;">7</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="8" style="flex: 1; min-width: 55px; font-size: 0.85rem;">8</button>
+        <button class="btn-neon btn-cyan btn-strain-num" data-val="9" style="flex: 1; min-width: 55px; font-size: 0.85rem;">9</button>
+        <button class="btn-neon btn-purple btn-strain-num" data-val="10" style="flex: 1; min-width: 55px; font-size: 0.85rem; border-color: #ff3366; color: #ff3366;">10</button>
+      </div>
+      <div class="telemetry-grid" style="margin-top: 1rem;">
+        <div class="stat-card">
+          <div class="stat-label">Ground Truth Value ($y$)</div>
+          <div class="stat-value purple" id="val-current-y">NULL</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">strain_reported Boolean Flag</div>
+          <div class="stat-value cyan" id="val-y-status">0 (FALSE)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">ML Model Compatibility</div>
+          <div class="stat-value emerald">BAYESIAN ORDINAL REGRESSION</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Real-Time Dual Channel Visualizer -->
+    <section class="glass-panel full-width" id="deck-visualizer">
+      <div class="panel-header">
+        <h2 class="panel-title">📈 Real-Time SciPy Filtered sEMG Envelopes (Left vs. Right)</h2>
+        <span class="badge badge-emerald">Clock 1 In-Memory 50Hz Render</span>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; color: var(--neon-cyan); font-family: var(--font-mono); font-size: 0.85rem;">
+        <span>CHANNEL 1 (LEFT TRAPEZIUS - 20–240Hz BANDPASS)</span>
+        <span id="lbl-left-rms">RMS: 0.00 mV</span>
+      </div>
+      <div class="canvas-container">
+        <canvas id="canvas-left" width="1300" height="160"></canvas>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-top: 1.5rem; color: var(--neon-purple); font-family: var(--font-mono); font-size: 0.85rem;">
+        <span>CHANNEL 2 (RIGHT TRAPEZIUS - 20–240Hz BANDPASS)</span>
+        <span id="lbl-right-rms">RMS: 0.00 mV</span>
+      </div>
+      <div class="canvas-container">
+        <canvas id="canvas-right" width="1300" height="160"></canvas>
+      </div>
+    </section>
+
+    <!-- Phase W1 Automated Latency & Verification Suite -->
+    <section class="glass-panel full-width" id="deck-benchmark">
+      <div class="panel-header">
+        <h2 class="panel-title">🚀 Phase W1 Automated Latency Benchmark & Verification Suite</h2>
+        <span class="badge badge-cyan">Sub-10ms Compliance Verification</span>
+      </div>
+      <p style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 1.5rem; line-height: 1.5;">
+        Deploy an intensive automated stress test executing 1,000 consecutive simulated audio/EMG stream chunks (50,000 samples) through the stateful Wasm Butterworth filters to generate the mandatory Phase W1 latency verification scorecard.
+      </p>
+      <div class="button-group">
+        <button id="btn-run-benchmark" class="btn-neon btn-purple" disabled>⚡ Deploy 1,000-Chunk Latency Test</button>
+      </div>
+      <div class="progress-track" id="benchmark-progress-track">
+        <div class="progress-bar" id="benchmark-progress-bar"></div>
+      </div>
+      <div class="telemetry-grid" id="benchmark-results" style="grid-template-columns: repeat(6, 1fr); margin-top: 2rem;">
+        <div class="stat-card">
+          <div class="stat-label">Total Chunks</div>
+          <div class="stat-value" id="bench-chunks">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Mean Latency</div>
+          <div class="stat-value cyan" id="bench-mean">0.00 ms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Median Latency</div>
+          <div class="stat-value cyan" id="bench-median">0.00 ms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">95th Percentile</div>
+          <div class="stat-value emerald" id="bench-p95">0.00 ms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Max Spike (P100)</div>
+          <div class="stat-value rose" id="bench-max">0.00 ms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Sub-10ms SLA</div>
+          <div class="stat-value emerald" id="bench-sla">PENDING</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>TensionBudget Web Deployment Suite (Phase W1) — Authoritative Python DSP running in WebAssembly. Raw sEMG streams strictly retained in client memory without remote transmission.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

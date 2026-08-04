@@ -1,0 +1,21 @@
+{
+    "session_id": "20260802_183420",
+    "user_name": "Laviish Jain",
+    "mode": "live",
+    "source_info": "Live LSL",
+    "start_time": "2026-08-02T18:34:20.334043",
+    "end_time": "2026-08-02T19:22:53.946022",
+    "status": "completed",
+    "user_snapshot": {
+        "birth_date": "2006-03-30",
+        "gender_sex": "M",
+        "weight_kg": 70.0,
+        "height_cm": 175.0,
+        "age_years_at_session": 20.3,
+        "bmi_at_session": 22.86
+    },
+    "calibration_baselines_mv": {
+        "left": 295.6124999422665,
+        "right": 1197.3853276720022
+    }
+}

@@ -340,5 +340,185 @@ Successfully conducted our first live hardware testing session with physical Ard
 - `logs/session_log.md` — Appended Phase 8.6 hardware validation session summary.
 
 ### Next phase
-Phase 9 — End-to-End System Verification, Personal Calibration Recording & Ergonomic Pilot Test Protocol.
+Phase 9 — Local Machine Learning Telemetry Logging, UI Subject Profiling & Onboarding Setup. Completed.
 ---
+
+## Phase 9 — Local Machine Learning Telemetry Logging, UI Subject Profiling & Collaborator Onboarding
+Timestamp: 2026-08-01T11:00:00+05:30
+Status: Completed
+
+### Summary
+Engineered a production-grade local logging subsystem (`chordspy/tensionbudget/local_logger.py`) to systematically capture structured feature vectors for downstream Machine Learning models and Cloud PostgreSQL ingestion without impacting high-speed visualization:
+1. **The Two-Clock Architectural Principle**: Enforced complete operational separation between Clock 1 (In-memory real-time LSL processing and GUI rendering operating @ 500 Hz) and Clock 2 (Discrete summary feature extraction writing ML training vectors at scheduled epoch intervals).
+2. **Subject Biometric Profiling & Storage Vaults**: Designed a standardized storage hierarchy under `output_logs/<User Name>/` (and user-specified `output-data/`). Automatically calculates dynamic age from birthdate and BMI from height/weight, persisting subject identities in a reusable `user_profile.json` along with session metadata JSON manifests and timestamps (`session_YYYYMMDD_HHMMSS_features.csv`).
+3. **Interactive GUI Profiler Integration**: Modified `chordspy/tensionbudget_app.py` to display an interactive modal on initiation of either Live LSL monitoring or Offline CSV replay, collecting subject details, attaching active baseline calibration values (`ref_rms_left`/`ref_rms_right`), and logging epoch summaries automatically during the playback loop.
+4. **Standalone Execution Bugfix**: Added explicit repository root injection into `sys.path` within `tensionbudget_app.py` to prevent `ModuleNotFoundError: No module named 'chordspy'` when executing directly from terminal environments.
+5. **Collaborator Onboarding & Git Cleanliness**: Authored a complete setup manual (`TENSIONBUDGET_ONBOARDING_GUIDE.md`) covering hardware connectivity, Python dependencies, and operational workflows. Re-engineered `.gitignore` to prevent Git commit bloat by excluding generated files >100MB, local telemetry logs, and personal biological calibration profiles (`tensionbudget_calibration.json`).
+
+### Files created / modified
+- `chordspy/tensionbudget/local_logger.py` — Created `LocalSessionLogger` class managing per-user directories, profile metadata, and feature vector CSV serialization.
+- `chordspy/tensionbudget_app.py` — Integrated user profiling modal, linked epoch boundary triggers inside `update_loop`, and resolved standalone path import resolution.
+- `TENSIONBUDGET_ONBOARDING_GUIDE.md` — Authored comprehensive onboarding guide for collaborative team setup and offline replay validation.
+- `.gitignore` — Added safety rules excluding `output_logs/`, large mock binary datasets, and temporary calibration JSON files.
+
+### Next phase
+Phase 11 — STAMI Display-Scale Calibration, Cumulative EIndex Logging Fix & Spectral R² Quality Telemetry. Completed.
+---
+
+## Phase 11 — STAMI Display-Scale Calibration, Cumulative EIndex Logging Fix & Spectral R² Quality Telemetry
+Timestamp: 2026-08-02T22:29:10+05:30
+Status: Completed
+
+### Summary
+Executed a multi-part architectural refinement and pilot diagnostic sprint addressing STAMI Norwegian working population display calibration, diagnosing and resolving silent CSV logging omissions, and introducing statistical regression quality telemetry:
+1. **STAMI Norwegian Working Population Calibration (`map_eindex_to_display_scale`)**:
+   - **SPSS Dataset & Scale Correction**: Corrected all documentation references from `S6_Dataset.csv` to **`S1_Dataset.sav` (SPSS format)** based on verified empirical audits. Resolved a crucial 100x scaling discrepancy: STAMI's stored proportions ($P_{\text{Rest}}$, $P_{\text{Low}}$, $P_{\text{High}}$) reside on a 0–100 percentage scale rather than a 0–1 fraction. Dividedraw formula results by 100 to establish precise population anchor constants in `TBConfig`: `EI_FLOOR = -3.854` (10th percentile restorative floor) and `EI_CEIL = 49.635` (90th percentile high-strain ceiling).
+   - **Scoped Linear Clipping Transformation**: Replaced the `NotImplementedError` stub in `scoring.py` with `map_eindex_to_display_scale(cumulative_eindex)`. The function performs linear transformation to a `[0.0, 100.0]` clinical presentation scale while clamping outlier values at boundary limits.
+   - **Strict Architectural Separation & Structural Guard**: Ensured display calibration applies **strictly and exclusively** to cumulative workday exposure (`eindex_session_cumulative`). Retained `ASYMMETRY_PENALTY_POINTS = 0.25` for unmapped real-time composite evaluation on the raw `[-2, +3]` domain. Created an automated AST/source-code structural regression test (`test_structural_guard_no_live_or_composite_mapping`) that scans all `.py` files in the repository to prevent accidental application of display scaling to live, per-side, or composite scores.
+
+2. **Bug 1 Resolution — Cumulative EIndex Omission in CSV Telemetry**:
+   - **Root Cause Analysis**: Investigated why `eindex_cumulative_left` and `eindex_cumulative_right` remained at `0.0` across all logged epochs in real user sessions. Discovered a twofold disconnect in `tensionbudget_app.py`: (1) `self.accumulator_l.submit_completed_window()` was defined in core scoring classes but never invoked during `update_loop()` or epoch transitions; and (2) during feature dictionary construction, the logger attempted to access `getattr(self.accumulator_l, "total_eindex", 0.0)`. Because the real property name is `eindex_session_cumulative`, Python silently defaulted to `0.0` on every logged row.
+   - **Correction & Signal Envelope Polish**: Modified `tensionbudget_app.py` to persist normalized moving RMS arrays (`last_sub_norm_l/r`), trigger `submit_completed_window()` upon each epoch boundary transition, and correctly target `eindex_session_cumulative`. Additionally resolved a minor signal processing edge defect in `calculate_moving_rms` by changing `np.pad()` mode from `'constant'` (which injected default leading zero-padding) to `'edge'`.
+   - **Automated Regression Suite**: Engineered an end-to-end GUI/logger integration test (`TestAppLoggerIntegration::test_cumulative_eindex_steps_upward_and_logs_cleanly`) in `test_phase8_app.py` that simulates multi-window playback sessions and verifies that cumulative EIndex increments upward across boundaries without freezing at `0.0`.
+
+3. **Bug 2 Investigation & Spectral Fatigue R² / n_windows Telemetry**:
+   - **Diagnostic Analysis of Extreme Slopes (`-196.08 Hz/min`)**: Explored why localized Median Power Frequency (MDF) fatigue slopes occasionally exhibited extreme spikes during pilot testing. Discovered that when an epoch boundary triggers during real-time tracking, the system logs `self.last_spec_res`, which is computed over the rolling GUI display buffer (`raw_left/right`). This buffer only retains **10 seconds of signal** (5,000 samples @ 500 Hz), producing at most 19 Welch windows. If a user performs a brief muscular burst lasting only 2–3 seconds, only 5–6 valid active windows exist—just enough to trigger linear regression (`SPECTRAL_MIN_VALID_WINDOWS = 5`). Because timestamps across a 3-second movement span only $\approx 0.05$ minutes, trivial frequency shifts of just $\pm 3.5\text{ Hz}$ are multiplied by $60\times$ when converting slope to $\text{Hz/min}$, creating artificial spikes like `-196 Hz/min`. The root physiological fix—running OLS regression across a full 5-minute epoch buffer—is explicitly deferred to Phase 12.
+   - **R² & n_windows Quality Telemetry**: Added `mdf_r_squared_left`, `mdf_r_squared_right`, `n_windows_left`, and `n_windows_right` directly into `CSV_HEADER` and row serialization within `local_logger.py`. This provides read-only baseline diagnostic exposure to evaluate the effectiveness of the future Phase 12 buffer upgrade without altering underlying physiological detection thresholds.
+   - **Granularity Re-evaluation**: Verified that within a 5-minute ($300\text{s}$) epoch, a continuous active session provides up to 599 potential Welch windows. At standard workstation active duty cycles (50–80%), an epoch should yield 300 to 450 valid windows—ensuring long-term OLS slope stability when spectral regression is transitioned to full epoch buffers in Phase 12.
+
+4. **Processing Version Boundary Marker (`phase11_edge_padding`)**:
+   - **Signal Processing Boundary Flag**: Introduced a mandatory `"processing_version": "phase11_edge_padding"` marker into all newly generated session metadata JSON files via `local_logger.py` and documented a warning note in `important_context.md`.
+   - **ML Training Dataset Warning**: Because sessions recorded prior to Phase 11 utilized zero-padding (`'constant'`) RMS envelopes while post-Phase-11 sessions utilize edge-padding (`'edge'`), pre- and post-Phase 11 recordings are not numerically comparable for RMS-derived metrics near buffer boundaries (APDF, gaps, EIndex) and must not be pooled for ML training without explicit numerical correction or version segmentation.
+
+### Files modified
+- `chordspy/tensionbudget/config.py` — Added `EI_FLOOR = -3.854`, `EI_CEIL = 49.635`, and detailed STAMI SPSS documentation; confirmed asymmetry penalty points remain intact for raw scale.
+- `chordspy/tensionbudget/scoring.py` — Implemented `map_eindex_to_display_scale()` with boundary clipping and population normative docstrings.
+- `chordspy/tensionbudget/local_logger.py` — Updated `CSV_HEADER` and `log_epoch()` row writer to export `mdf_r_squared_left/right` and `n_windows_left/right`; injected `PROCESSING_VERSION` marker into metadata JSON manifests.
+- `chordspy/tensionbudget_app.py` — Fixed cumulative EIndex logging by calling `submit_completed_window()` at epoch transitions, fixing accumulator property references (`eindex_session_cumulative`), and setting moving RMS padding to `'edge'`.
+- `chordspy/tensionbudget/tests/test_phase6_scoring.py` — Added unit test suite `TestStamiMapping` covering endpoint mapping, boundary clipping, and AST structural guard checks against illegal mapping calls.
+- `chordspy/tensionbudget/tests/test_phase8_app.py` — Added `TestAppLoggerIntegration` end-to-end integration regression test verifying upward step progression of cumulative EIndex across sequential logged epochs, inclusion of `n_windows_left` in CSV schemas, and `processing_version` metadata marking.
+- `important_context.md` — Updated historical file references from `S6_Dataset.csv` to `S1_Dataset.sav`; appended item #18 warning against pooling pre/post-Phase 11 RMS datasets.
+
+### Test Summary
+- Verified **68 / 68 passing unit and integration tests** across `test_phase6_scoring.py`, `test_phase7_spectral.py`, and `test_phase8_app.py` (execution time: 9.86s).
+
+### Next phase
+Phase 12 — Full-Epoch Spectral Accumulation Upgrade & Cloud PostgreSQL Ingestion Pipelines. Completed.
+---
+
+## Phase 12 — Full-Epoch Spectral Accumulation Upgrade & Cloud PostgreSQL Ingestion Pipeline
+Timestamp: 2026-08-03T14:30:00+05:30
+Status: Completed
+
+### Summary
+Executed Phase 12 to resolve Bug 2's root physiological cause and engineer the cloud-ready PostgreSQL database ingestion pipeline for pilot ML datasets:
+1. **Full-Epoch Spectral Accumulation Upgrade (Bug 2 Root Fix & Signal Tap Correction)**:
+   - **Architectural Signal Tap Correction**: Incorporated a critical Stage 2 signal engineering correction: rather than accumulating unfiltered ADC outputs (which would leave mains interference and low-frequency motion drifts uncorrected in the analysis band), the epoch buffers (`epoch_filt_l/r`) explicitly accumulate **pre-rectified bandpass and notch filtered samples** (20–240 Hz and 50/60 Hz notch via stateful causal Second-Order Sections in `StreamingChannelProcessor`).
+   - **Full 5-Minute Accumulation Buffer**: Modified `tensionbudget_app.py` to populate `epoch_filt_l/r` continuously during `update_loop()`, bounding maximum memory footprint to 150,000 samples ($300\text{s} \times 500\text{ Hz}$). When `_log_current_epoch()` triggers, Welch power spectral density and OLS linear regression (`analyze_bilateral_spectral_fatigue`) execute over the complete accumulated 5-minute buffer rather than the short 10s visualization GUI buffer.
+   - **Memory Management & Window Volume**: Ensured `epoch_filt_l/r` arrays clear their contents instantly upon logging to free system memory. Verified that continuous active usage produces $\ge 300$ Welch windows per epoch (up from $\le 19$ on the 10s GUI buffer), mathematically eliminating erratic slope magnitude inflation under brief contractions.
+   - **Automated Verification Suite**: Created unit and integration tests (`test_phase12_spectral_epoch.py`) confirming $>20\text{ dB}$ attenuation of out-of-band low-frequency drifts, $\ge 300$ observed window counts in logged CSV telemetry, memory clearance upon epoch transitions, and OLS slope bounded stability ($< 15\text{ Hz/min}$) during simulated 3-second muscular bursts.
+
+2. **Cloud PostgreSQL & ML Relational Database Ingestion Engine**:
+   - **3-Tier Privacy & Telemetry Schema (`cloud_schema.py`)**: Built universal relational DDL definitions for SQLite local testing and cloud PostgreSQL deployment across four core tables: Tier 1 (`user_profiles`), Tier 2 (`sessions` metadata vault), Tier 3 (`epoch_features` and `self_reports`), and a wide-format SQL view (`v_ml_training_pairs`) combining user demographics and calibration references directly with longitudinal epoch features.
+   - **Idempotent Ingestion & Version Segmentation (`cloud_ingest.py`)**: Developed an automated synchronization engine that scans local log directories (`output_logs/`, `output-data/`) for paired `*_metadata.json` and `*_features.csv` manifests. The engine executes idempotent upserts (`ON CONFLICT` style check-and-update behavior) ensuring repeated synchronizations produce zero duplicate rows.
+   - **Legacy Version Tagging**: Automatically detects pre-Phase 11 pilot sessions that lack the `processing_version` JSON field and assigns them `"processing_version": "legacy_constant_padding"`, preventing uncorrected pooling with modern edge-padded recordings during ML model training.
+   - **Explicit Missingness Normalization**: Translates resting frequency empty strings (`""` in MDF/MNF during muscular silence) to SQL `NULL` while retaining explicit boolean flags (`mdf_computed_left/right`, `is_fatiguing_left/right`), safeguarding ML models from false zero imputations.
+   - **CLI Synchronization Utility (`scripts/ingest_to_postgres.py`)**: Designed a clean command-line synchronization tool with ASCII formatting for cross-platform Windows terminal execution and automated summary reporting.
+
+3. **Dependency Decoupling in `chordspy`**:
+   - Updated `chordspy/__init__.py` with optional `try-except ImportError` handling around top-level app and BLE connection imports, enabling lightweight execution of standalone data scripts and test suites without requiring hardware drivers (`bleak`, `pylsl`, `pyserial`).
+
+### Files created / modified
+- `chordspy/tensionbudget_app.py` — Added `StreamingChannelProcessor` instances for left/right channels, integrated filtered epoch sample accumulation into `update_loop()`, routed full-epoch arrays to spectral fatigue evaluation in `_log_current_epoch()`, and added buffer clearing.
+- `chordspy/tensionbudget/cloud_schema.py` — Created 3-Tier relational SQL schema definitions and ML training view `v_ml_training_pairs` for SQLite and PostgreSQL.
+- `chordspy/tensionbudget/cloud_ingest.py` — Built idempotent batch ingestion engine with missingness normalization and legacy processing version segmentation.
+- `scripts/ingest_to_postgres.py` — Created CLI synchronization command-line interface tool.
+- `chordspy/__init__.py` — Decoupled top-level package imports from hardware BLE driver dependencies.
+- `chordspy/tensionbudget/tests/test_phase12_spectral_epoch.py` — Added unit and integration test suite proving Stage 2 filter tap attenuation, $\ge 300$ window volume, slope stability under short bursts, and memory clearing.
+- `chordspy/tensionbudget/tests/test_phase12_cloud_ingest.py` — Added test suite verifying DDL creation, SQL view output, idempotent upserting, NULL missingness conversion, and legacy session tagging.
+
+### Test Summary
+- Executed and verified **73 / 73 passing unit and integration tests** across Phases 1 through 12 (`pytest chordspy/tensionbudget/tests/ -v`, execution time: 12.82s).
+- Successfully validated live synchronization against real pilot recordings in `output-data/`, accurately segmenting 2 legacy zero-padded sessions and storing all 7 epoch rows cleanly without duplications on repeated runs.
+
+### Next phase
+Phase 13 / Web Deployment (Phases W1–W6) — Web Serial + Pyodide Browser Bridge & Cloud Backend Infrastructure.
+
+---
+
+## 2026-08-03 — Phase W1 Complete & Architectural Documentation Reconciliation
+
+### Context & Objectives
+Followed up on user review of the Web Deployment / ML-Ready Cloud Architecture plan (Phases W1–W6). Addressed three mandatory doc/schema fixes and confirmed crucial architectural policies before initiating Phase W1 implementation:
+1. **Fix 1 (Epoch Cadence Standardization)**: Corrected stale references to "10-minute" epoch logging intervals across all architectural documents and `cloud_schema.py` docstrings, standardizing strictly on **5-minute epochs (300 seconds)** to match live execution math in `tensionbudget_app.py` line 500 (`self.sampling_rate * 300`) and double ML row density.
+2. **Fix 2 (Telemetry Fields Integration)**: Updated all entity relationship diagrams and specifications to explicitly incorporate `mdf_r_squared_left/right` (regression quality diagnostic), `n_windows_left/right` (buffer volume validation), and `processing_version` on `sessions` (legacy zero-padded vs. edge-padded boundary tracking).
+3. **Fix 3 (Canonical Table Reconcilation)**: Harmonized the Web App database schema directly with Phase 12's authoritative DDL in `cloud_schema.py` Table 1 (`user_profiles`), Table 2 (`sessions`), and Table 3 (`epoch_features`), preventing structural drift between desktop CLI ingestion and cloud API endpoints.
+4. **Architectural Confirmation & Policy Exceptions**:
+   - Explicitly logged the **Scoped Raw Signal Policy Exception**: for the web deployment path only, raw 500 Hz sEMG sample streams exist solely in temporary client browser RAM for calculation and visualization, vanishing on tab closure without network upload to prevent bandwidth exhaustion and biological privacy exposure. Confirmed that local desktop execution logs (`output_logs/`) remain sacred and continue storing full raw waveform archives as originally mandated.
+   - Documented hardware awareness regarding the COM5 vs. COM6 250 Hz effective-Nyquist discrepancy, noting that switching from `pyserial` to browser Web Serial changes the transport layer without altering underlying dual Arduino firmware timing characteristics.
+
+### Work accomplished & verified
+
+1. **Schema & Document Standardization**:
+   - Reconciled [cloud_schema.py](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/chordspy/tensionbudget/cloud_schema.py) docstrings, [implementation_plan_deployement](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/implementation_plan_deployement), and [cloud_database_and_ml_schema_specification.md](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/cloud_database_and_ml_schema_specification.md) (both root and brain artifact copies) with complete 36-column feature matrices, 5-minute epoch cadences, and explicit missingness boolean indicators.
+
+2. **Phase W1 Deliverable — Web Serial + Pyodide Wasm Bridge Spike (`web_spike/`)**:
+   - **Zero DSP Rewrite Enforcement**: Developed a standalone browser verification environment in `web_spike/` that executes our canonical Python signal processing math (Second-Order Butterworth bandpass 20–240 Hz and notch filtering) unmodified within Pyodide WebAssembly.
+   - **[server.py](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/web_spike/server.py)**: Engineered a zero-dependency local Python HTTP development server on port 8000 configured with Cross-Origin resource sharing and CoOP/CoEP headers to maximize Wasm thread concurrency and timer resolution.
+   - **[worker.js](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/web_spike/worker.js)**: Constructed a dedicated Pyodide Web Worker that dynamically downloads NumPy and SciPy via CDN, instantiates stateful `WasmStreamingProcessor` instances for left and right channels, and incorporates an automated **1,000-chunk latency stress benchmark** (50,000 samples) evaluating statistical execution durations (Mean, Median, P95, Max) against the sub-10 ms SLA requirement.
+   - **[index.html](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/web_spike/index.html) & [index.css](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/web_spike/index.css)**: Built an ultra-premium dark mode glassmorphism UI styled with neon cyan/purple HSL color palettes, responsive telemetry grids, accessible hardware controls, and unique descriptive element IDs.
+   - **[app.js](file:///C:/Users/mohit/Downloads/Chords-Python-main/Chords-Python-main/web_spike/app.js)**: Implemented dual Web Serial hardware gateway bindings (`navigator.serial` for COM6 / COM5 equivalents), an interactive real-time 500 Hz stream emulator, 50 Hz canvas waveform animation engines, and automated verification autorun logic.
+
+### Files created / modified
+- `chordspy/tensionbudget/cloud_schema.py` — Updated docstring cadence references to 5-minute intervals.
+- `implementation_plan_deployement` — Overwritten with reconciled 5-minute cadence, complete 3-Tier canonical ERD, telemetry quality fields (`mdf_r_squared`, `n_windows`, `processing_version`), and scoped raw data exception policies.
+- `cloud_database_and_ml_schema_specification.md` — Synchronized root and brain artifact specifications with canonical DDL structure and 5-minute epoch frequency.
+- `web_spike/server.py` — Created local Wasm development server with Cross-Origin isolation headers.
+- `web_spike/worker.js` — Created Pyodide Wasm worker embedding stateful SciPy SOS filtering math and automated stress benchmarking.
+- `web_spike/index.html` — Created semantic dark glassmorphism verification workspace template.
+- `web_spike/index.css` — Created HSL neon token styling and animation design system.
+- `web_spike/app.js` — Created Web Serial port controller, 500 Hz stream simulator, and latency reporting suite.
+
+### Test Summary
+- Re-verified complete existing test suite: **73 / 73 tests passed** (`python -m pytest -v chordspy/tensionbudget/tests/`, execution time: 14.56s), confirming zero regressions in offline math or cloud database DDL generation.
+- Phase W1 browser benchmark verified to process 50-sample EMG chunks through SciPy bandpass/notch filters in browser memory with sub-10 ms roundtrip execution time.
+
+### Next phase
+Phase W2 — Bayesian Hierarchical Modeling Foundation, Borg CR-10 Continuous Scale & 38-Column Schema Standardization. Completed.
+---
+
+## Phase W2 — Bayesian Hierarchical Modeling Foundation, Borg CR-10 Continuous Scale & 38-Column Schema Standardization
+Timestamp: 2026-08-04T07:55:00+05:30
+Status: Completed
+
+### Summary
+Executed a comprehensive architectural upgrade to establish the foundation for Bayesian Hierarchical Modeling and ordinal regression on subjective muscular fatigue, eliminating historical missing-data sentinels and standardizing all local data archives:
+1. **Full 0–10 Borg CR-10 Continuous Scale Adoption**:
+   - **Variance Preservation for Ordinal Regression**: Replaced the restrictive 4-point discrete scale (which collapsed perceived strain into anchor values 1, 5, 8, 10) with the complete continuous `[0.0, 10.0]` Borg CR-10 domain in `config.py` (`STRAIN_SCALE_MIN = 0.0`, `STRAIN_SCALE_MAX = 10.0`). Preserving full scale resolution is critical for Bayesian Hierarchical Models and ordinal regression, where artificial categorization destroys variance.
+   - **Standardized Verbal Anchor Definitions**: Defined canonical descriptions for all integer anchors from `0` (Nothing at all / Complete Rest) to `10` (Absolute maximum / Intolerable pain/fatigue).
+2. **Elimination of `-1.0` Sentinel via Explicit `strain_reported` Boolean Flag**:
+   - **Prior Contamination Guard**: Identified and eliminated a severe statistical regression bug where unrecorded strain ratings were stored as `-1.0`. In Bayesian modeling, ingesting `-1.0` without manual SQL filtering would falsely treat unreported epochs as "more relaxed than complete rest," severely distorting prior distributions and target coefficients.
+   - **Explicit Missingness Convention**: Adopted the exact dual-column convention established for spectral fatigue (`mdf_computed`):
+     1. Added a dedicated boolean column `strain_reported` (`INTEGER NOT NULL DEFAULT 0` in PostgreSQL DDL and `"1"` or `"0"` in CSV telemetry).
+     2. When strain is unrecorded or skipped, `subjective_strain_cr10` is written as an empty string `""` in local CSV files and as SQL `NULL` in the cloud database.
+3. **Multi-Interface UI & Dashboard Upgrades**:
+   - **Desktop Monitor (`tensionbudget_app.py`)**: Upgraded the interactive strain selection dropdown to populate all integers 0 through 10 along with their verbal descriptions, plus an explicit index-0 option: `[NULL] Unreported / Skip (strain_reported = 0)`. Updated target variable handlers to pass `None` when unreported.
+   - **Web Spike Dashboard (`web_spike/index.html` & `app.js`)**: Replaced the 4-point buttons with a **Continuous 0.0–10.0 Interactive Slider** (half-point resolution), direct clickable integer buttons for 0 through 10, and a dedicated **`[NULL] Unreported / Skip (Flag 0)`** button.
+4. **Repository-Wide Historical Session Log Standardization (38-Column Schema)**:
+   - **Schema Alignment**: Engineered and executed an automated migration utility across all existing feature log CSV files in `output-data/` and `output_logs/` (`session_20260802_181623_features.csv`, `session_20260803_221657_features.csv`, etc.).
+   - **Universal 38-Column Matrix**: Standardized all historical recordings to our authoritative 38-column format terminating in `mdf_computed_right, is_fatiguing_right, strain_reported, subjective_strain_cr10`. All legacy missing-data sentinels (`-1` or `-1.0`) and absent target columns were cleanly migrated to `,0,` (`strain_reported = 0`, `subjective_strain_cr10 = ""`).
+
+### Files modified
+- `chordspy/tensionbudget/config.py` — Updated scale minimum/maximum constants and descriptions to full 0–10 Borg CR-10 domain.
+- `chordspy/tensionbudget/local_logger.py` — Added `strain_reported` column to `CSV_HEADER`; updated `log_epoch()` to serialize empty string `""` for unrecorded ratings and set explicit `strain_reported` flag.
+- `chordspy/tensionbudget/cloud_schema.py` — Added `strain_reported INTEGER NOT NULL DEFAULT 0` column to Table 3 (`epoch_features`); updated `subjective_strain_cr10` default to `REAL DEFAULT NULL`.
+- `chordspy/tensionbudget_app.py` — Upgraded GUI dropdown menu to full 0–10 domain + NULL unrecorded option; updated logging call to pass `None` when unrecorded.
+- `web_spike/index.html` — Updated UI with 0–10 continuous slider, 0–10 integer buttons, and NULL unrecorded button.
+- `web_spike/app.js` — Replaced Target $y$ event handler logic with continuous slider input resolution, integer buttons, and explicit NULL flag display updating.
+- `output-data/*_features.csv` & `output_logs/*/*_features.csv` — Migrated all historical session datasets across the repository to the uniform 38-column schema with clean missing-data flags.
+
+### Test Summary
+- Executed and verified **73 / 73 passing unit and regression tests** (`python -m pytest -v`, execution time: 3.37s) with zero regressions in mathematical calculations or cloud schema initialization.
+
+### Next phase
+Phase W3 — Service Worker Caching & Offline PWA Persistence (or Cloud PostgreSQL Dataset Ingestion & Bayesian Model Exploration).

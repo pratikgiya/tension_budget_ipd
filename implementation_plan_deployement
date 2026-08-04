@@ -1,6 +1,6 @@
 # TensionBudget — Web Deployment & ML-Ready Cloud Architecture (Phases W1–W6)
 
-This specification defines the migration of our verified local desktop pipeline (Phases 1–7) into a **modern, secure, multi-user cloud web application** without rewriting any digital signal processing (DSP) logic. The local Python codebase remains the authoritative source of truth and executes directly inside the browser using **Pyodide (WebAssembly)**, while an asynchronous cloud layer on **PostgreSQL** handles user authentication, session logging, and per-user ML personalization.
+This specification defines the migration of our verified local desktop pipeline (Phases 1–12) into a **modern, secure, multi-user cloud web application** without rewriting any digital signal processing (DSP) logic. The local Python codebase remains the authoritative source of truth and executes directly inside the browser using **Pyodide (WebAssembly)**, while an asynchronous cloud layer on **PostgreSQL** handles user authentication, session logging, and per-user ML personalization.
 
 ---
 
@@ -9,19 +9,23 @@ This specification defines the migration of our verified local desktop pipeline 
 > **Zero DSP Rewrites (Source of Truth)**: All existing math in `preprocessing.py`, `scoring.py`, `spectral.py`, and `analytics.py` (using `numpy`/`scipy`) will run unmodified inside Pyodide WebAssembly. We only modify the hardware acquisition boundary: replacing `pyserial` with the browser's native **Web Serial API**.
 
 > [!CAUTION]
-> **Raw Signal Persistence Decision (FLAGGED)**: In accordance with your non-negotiables, **raw 500 Hz sEMG streams will NOT be uploaded to the server**. Raw samples exist strictly in temporary browser memory for real-time calculation and visualization, and vanish upon tab closure. Only discrete 10-minute feature summaries leave the user's device.
+> **Raw Signal Persistence Decision (SCOPED POLICY EXCEPTION FOR WEB ONLY)**: In accordance with your confirmation, **raw 500 Hz sEMG streams will NOT be uploaded to the server over the web deployment path**. For browser-based sessions over Web Serial, uploading continuous uncompressed 500 Hz raw signal across residential connections incurs severe network overhead and biological privacy risks. Raw samples exist strictly in temporary browser WebAssembly memory for real-time analysis/visualization and vanish upon tab closure; only discrete 5-minute feature summaries survive server-side.
+> **Desktop Path Inviolation**: This is explicitly a scoped privacy exception ONLY for the web path. The local desktop application / `output_logs/` path continues to log and retain full, raw, un-rectified, un-filtered 500 Hz recoverable data exactly as originally mandated by our Phase 1 non-negotiable principle.
 
 > [!NOTE]
-> **Structural Auth vs. Research Data Isolation**: To comply with privacy best practices, authentication (`email`/`password_hash`) is structurally decoupled from biometric research data. Login tables NEVER touch research tables; authentication simply issues an anonymized `subject_id` (UUID), which serves as the sole link to physical metadata and ergonomic histories.
+> **Symmetrical 500 Hz Hardware Sampling Rate (COM5 & COM6)**: Both Left and Right trapezius channels must operate strictly at **500 Hz (Nyquist = 250 Hz)** to enable uncompromised 20–240 Hz Butterworth bandpass filtering and Welch power spectral fatigue regression across both shoulders. Historical references to 250 Hz test limits on COM5 were due to test firmware prototypes and have been entirely eliminated.
+
+> [!NOTE]
+> **Structural Auth vs. Research Data Isolation**: To comply with privacy best practices, authentication (`email`/`password_hash`) is structurally decoupled from biometric research data. Login tables NEVER touch research tables; authentication simply issues an anonymized ID (`user_name` / `subject_id`), which serves as the sole link to physical metadata and ergonomic histories.
 
 > [!TIP]
-> **ML-Ready Tabular Design (Flattened Schema + Explicit Missingness)**: To guarantee type safety and native ingestion into ML engines (scikit-learn/XGBoost) without expensive JSON parsing or Parquet over-engineering, `computed_features` stores every feature as an explicit typed SQL column. Crucially, to prevent conditional MDF/MNF calculations (`NULL` during resting states) from being imputed as `0 Hz` by ML models, we enforce explicit missingness boolean indicators (`mdf_computed_left` / `right`).
+> **ML-Ready Tabular Design (Flattened Schema + Explicit Missingness)**: To guarantee type safety and native ingestion into ML engines (scikit-learn/XGBoost) without expensive JSON parsing or Parquet over-engineering, `epoch_features` stores every feature as an explicit typed SQL column. Crucially, to prevent conditional MDF/MNF calculations (`NULL` during resting states) from being imputed as `0 Hz` by ML models, we enforce explicit missingness boolean indicators (`mdf_computed_left` / `right`).
 
 ---
 
 ## Complete Runtime Workflow & Data Telemetry Flow
 
-The runtime data collection operates on a clean **3-Stage Telemetry Loop**, precisely mapping physical hardware events to database table insertions:
+The runtime data collection operates on a clean **3-Stage Telemetry Loop**, precisely mapping physical hardware events to database table insertions at **5-minute intervals** (doubling ML row density over early 10-minute prototypes):
 
 ```mermaid
 sequenceDiagram
@@ -34,104 +38,138 @@ sequenceDiagram
     note over User, DB: Stage 1: Session Initiation & Personal Calibration
     User->>Browser: Click "Start Recorded Session" & do 5s Shrug Test
     Browser->>Browser: Compute personal baselines: calibration_rms_left & right
-    Browser->>API: POST /session/start (subject_id, calibration values)
-    API->>DB: INSERT INTO sessions (subject_id, start_time, calibration_rms) -> returns session_id
+    Browser->>API: POST /session/start (user_name, calibration values, processing_version)
+    API->>DB: INSERT INTO sessions (user_name, start_time, calibration_rms, processing_version) -> returns session_id
 
-    note over User, DB: Stage 2: Real-Time Monitoring & 10-Minute Periodic Epoch Logging
-    loop Real-Time Ergonomic Surveillance (Clock 1: In-Memory 50Hz)
+    note over User, DB: Stage 2: Real-Time Monitoring & 5-Minute Periodic Epoch Logging
+    loop Real-Time Ergonomic Surveillance (Clock 1: In-Memory 500Hz)
         Browser->>Browser: Stream USB Arduinos via Web Serial & update GUI gauges
-        note right of Browser: When Elapsed Time crosses 10-Min boundary (Clock 2):
-        Browser->>API: POST /session/log_epoch (session_id, epoch_index, 30+ flattened features)
-        API->>DB: INSERT INTO computed_features (session_id, epoch_index, composite_score, MDF, etc.)
+        note right of Browser: When Elapsed Time crosses 5-Min boundary (Clock 2):
+        Browser->>API: POST /session/log_epoch (session_id, epoch_index, 36 flattened features)
+        API->>DB: INSERT INTO epoch_features (session_id, epoch_index, composite_score, mdf_r_squared_left, etc.)
     end
 
     note over User, DB: Stage 3: Teardown & Final Snapshot
     User->>Browser: Click "Stop Recording" (or close browser tab)
     Browser->>API: POST /session/end (session_id, final_epoch_data)
-    API->>DB: INSERT final computed_features row & UPDATE sessions SET status = 'completed'
+    API->>DB: INSERT final epoch_features row & UPDATE sessions SET end_time = now()
 ```
 
 ---
 
-## Database Schema Anatomy & Relational Hierarchy
+## Database Schema Anatomy & Relational Hierarchy (Reconciled with `cloud_schema.py`)
 
-Our relational database structure follows a strict **3-Tier Privacy & Longitudinal Telemetry Hierarchy**:
+To prevent architectural drift between the desktop CLI ingestion engine and the web backend, this schema is explicitly reconciled with Phase 12's **canonical definition (`chordspy/tensionbudget/cloud_schema.py`)**. Both ingestion paths write directly into the exact same tables and columns, following a strict **3-Tier Privacy & Longitudinal Telemetry Hierarchy**:
 
 ```mermaid
 erDiagram
     auth_users {
         string email PK
         string password_hash
-        uuid subject_id UK "Isolated Bridge"
+        string user_name UK "Isolated Bridge ID"
     }
-    subjects_metadata {
-        uuid subject_id PK_FK "References auth_users"
-        date birth_date
+    user_profiles {
+        string user_name PK "Mapped from auth user_name"
+        string birth_date
         string gender_sex "M, F, Other"
         real weight_kg
         real height_cm
+        real updated_at
     }
     sessions {
-        int session_id PK
-        uuid subject_id FK "References subjects_metadata"
-        timestamp start_time
-        timestamp end_time
+        string session_id PK
+        string user_name FK "References user_profiles"
+        real start_time
+        string start_time_str
+        real end_time
+        string end_time_str
+        string mode
         real calibration_rms_left
         real calibration_rms_right
-        string status
+        string processing_version "phase11_edge_padding / legacy_constant_padding"
     }
-    computed_features {
+    epoch_features {
         int feature_id PK
-        int session_id FK "References sessions"
+        string session_id FK "References sessions"
         int epoch_index "Window #1, #2..."
-        timestamp timestamp
+        real elapsed_minutes
         real composite_score
-        real short_suma_penalty
-        real mdf_hz
-        boolean mdf_computed
+        real eindex_live_left
+        real eindex_live_right
+        real eindex_cumulative_left
+        real eindex_cumulative_right
+        real short_suma_penalty_left
+        real short_suma_penalty_right
+        real total_suma_bursts_left
+        real total_suma_bursts_right
+        real gap_frequency_left
+        real gap_frequency_right
+        real apdf_10_left
+        real apdf_10_right
+        real apdf_50_left
+        real apdf_50_right
+        real apdf_90_left
+        real apdf_90_right
+        real asymmetry_index_ai
+        int asymmetry_penalty_applied
+        real mdf_hz_left
+        real mdf_hz_right
+        real mnf_hz_left
+        real mnf_hz_right
+        real fatigue_slope_left
+        real fatigue_slope_right
+        real mdf_r_squared_left "Regression fit diagnostic"
+        real mdf_r_squared_right "Regression fit diagnostic"
+        real n_windows_left "Buffer volume verification"
+        real n_windows_right "Buffer volume verification"
+        int mdf_computed_left "Explicit Missingness Flag"
+        int is_fatiguing_left
+        int mdf_computed_right "Explicit Missingness Flag"
+        int is_fatiguing_right
     }
     self_reports {
         int report_id PK
-        int session_id FK "References sessions"
-        timestamp timestamp
+        string session_id FK "References sessions"
+        real timestamp
         int perceived_exertion_rating
     }
     alert_events {
         int alert_id PK
-        int session_id FK "References sessions"
-        timestamp timestamp
+        string session_id FK "References sessions"
+        real timestamp
         string alert_type
     }
 
-    auth_users ||--|| subjects_metadata : "issues anonymous subject_id"
-    subjects_metadata ||--o{ sessions : "participates in many"
-    sessions ||--o{ computed_features : "logs features every 10 mins"
+    auth_users ||--|| user_profiles : "issues anonymous ID"
+    user_profiles ||--o{ sessions : "participates in many"
+    sessions ||--o{ epoch_features : "logs features every 5 mins"
     sessions ||--o{ self_reports : "collects discomfort labels"
     sessions ||--o{ alert_events : "records postural alarms"
 ```
 
 ### 1. Tier 1: The Privacy & Identity Firewall
-- **`auth_users`**: Holds sensitive login authentication (`email`, `password_hash`). Its sole purpose is to authenticate the user and issue an anonymized `subject_id` (UUID).
-- **`subjects_metadata` (De-Identified Research Vault)**: Keyed strictly by `subject_id`. Contains NO names or emails.
-  - **Biological Attributes**: `birth_date` (DATE), `gender_sex` (VARCHAR), `weight_kg` (REAL - Nullable), `height_cm` (REAL - Nullable).
-  - **Dynamic Age Computation**: Computed dynamically at query time via SQL: `EXTRACT(YEAR FROM AGE(birth_date))`.
+- **`auth_users`**: Holds sensitive login authentication (`email`, `password_hash`). Its sole purpose is to authenticate the user and issue an anonymized ID (`user_name` or UUID).
+- **`user_profiles` (Canonical Research Vault)**: Keyed strictly by `user_name` (Table 1 in `cloud_schema.py`). Contains NO emails or passwords.
+  - **Biological Attributes**: `birth_date` (TEXT/DATE), `gender_sex` (TEXT), `weight_kg` (REAL), `height_cm` (REAL), `updated_at` (REAL/TIMESTAMP).
+  - **Dynamic Age Computation**: Computed dynamically at query time via SQL: `EXTRACT(YEAR FROM AGE(birth_date::date))`.
   - **Dynamic BMI Computation**: When weight and height exist, Body Mass Index ($BMI = \frac{\text{weight in kg}}{(\text{height in m})^2}$) is evaluated dynamically in SQL: `ROUND(weight_kg / POWER(height_cm / 100.0, 2), 2)`.
 
 ### 2. Tier 2: The Working Session & Personal Baseline
-- **`sessions`**: Created when a user begins a monitoring sitting. Linked upward to Tier 1 via `subject_id`.
-  - **Calibration Storage**: Captures the exact physical baseline from their initial 5-second shoulder shrug test: `calibration_rms_left` (REAL) and `calibration_rms_right` (REAL). Storing this here ensures every historical session permanently records the baseline sensitivity that governed its scores!
+- **`sessions`**: Created when a user begins a monitoring sitting (Table 2 in `cloud_schema.py`). Linked upward to Tier 1 via `user_name`.
+  - **Calibration Storage**: Captures the exact physical baseline from their initial 5-second shoulder shrug test: `calibration_rms_left` (REAL) and `calibration_rms_right` (REAL). Storing this here ensures every historical session permanently records the baseline sensitivity that governed its scores.
+  - **Processing Version Tagging**: Captures `processing_version` (e.g. `'phase11_edge_padding'` or `'legacy_constant_padding'`) to prevent numerical corruption during pooled ML training across disparate signal processing iterations.
 
-### 3. Tier 3: The 10-Minute Longitudinal Feature Logs
-All three analytical tables point upward to `sessions(session_id)` via Foreign Keys (`FK`), creating an unbroken chain connecting every single 10-minute snapshot back to the exact shrug calibration and physical subject profile:
-- **`computed_features`**: Our flattened, wide-format tabular feature matrix. Exactly ONE row is added every 10 minutes from session start to session end!
-  - Columns: `feature_id`, `session_id` (FK), `epoch_index`, `timestamp`, `elapsed_minutes`, `composite_score`, `eindex_live_left/right`, `eindex_cumulative_left/right`, `short_suma_penalty_left/right`, `total_suma_bursts_left/right`, `gap_frequency_left/right`, `apdf_10_left/right`, `apdf_50_left/right`, `apdf_90_left/right`, `asymmetry_index_ai`, `asymmetry_penalty_applied`, `mdf_hz_left/right`, `mnf_hz_left/right`, `fatigue_slope_left/right`, **`mdf_computed_left/right` (Explicit Missingness Boolean)**, and `is_fatiguing_left/right`.
+### 3. Tier 3: The 5-Minute Longitudinal Feature Logs
+All analytical tables point upward to `sessions(session_id)` via Foreign Keys (`FK`), creating an unbroken chain connecting every single 5-minute snapshot back to the exact shrug calibration and physical subject profile:
+- **`epoch_features` (Canonical Wide Feature Matrix)**: Table 3 in `cloud_schema.py`. Exactly ONE row is added every **5 minutes** from session start to session end, doubling ML row density over early prototypes.
+  - Complete Column Set: `feature_id`, `session_id` (FK), `epoch_index`, `elapsed_minutes`, `composite_score`, `eindex_live_left/right`, `eindex_cumulative_left/right`, `short_suma_penalty_left/right`, `total_suma_bursts_left/right`, `gap_frequency_left/right`, `apdf_10_left/right`, `apdf_50_left/right`, `apdf_90_left/right`, `asymmetry_index_ai`, `asymmetry_penalty_applied`, `mdf_hz_left/right`, `mnf_hz_left/right`, `fatigue_slope_left/right`, **`mdf_r_squared_left/right` (Quality Diagnostic)**, **`n_windows_left/right` (Buffer Verification)**, **`mdf_computed_left/right` (Explicit Missingness Boolean)**, and `is_fatiguing_left/right`.
 - **`self_reports`**: Logs timestamped user subjective perceived exertion ratings (RPE 1–10) during the working session.
-- **`alert_events`**: Captures asynchronous real-time alarms fired when posture asymmetry or muscle fatigue exceed tolerance.
-- **`v_ml_training_pairs` (SQL VIEW)**: Automatically joins Tier 1 (`subjects` dynamic Age, Sex, & BMI), Tier 2 (`sessions` shrug baseline), and Tier 3 (`computed_features` + matched `self_reports`), exporting clean $X \rightarrow Y$ training DataFrames directly to `pandas.read_sql()`.
+- **`alert_events`**: Captures asynchronous real-time browser alarms fired when posture asymmetry or muscle fatigue exceed tolerance during active GUI tracking.
+- **`v_ml_training_pairs` (SQL VIEW)**: Automatically joins Tier 1 (`user_profiles` demographic features), Tier 2 (`sessions` shrug baseline and `processing_version`), and Tier 3 (`epoch_features` + matched `self_reports`), exporting clean $X \rightarrow Y$ training DataFrames directly to `pandas.read_sql()`.
 
 ---
 
-## Proposed Phased Implementation
+## Phased Implementation Roadmap
 
 ### Phase W1 — Web Serial + Pyodide Bridge (Spike & Verification)
 - Create a standalone proof-of-concept workspace (`web_spike/`):
@@ -144,19 +182,13 @@ All three analytical tables point upward to `sessions(session_id)` via Foreign K
 - **Service Worker (`sw.js`)**: Cache the multi-MB Wasm binaries for Pyodide, NumPy, and SciPy so subsequent visits load instantly offline.
 
 ### Phase W3 — Backend API & ML-Ready Postgres Schema Transition
-- Deploy a structured FastAPI (or Flask + asyncpg) cloud backend connected to **PostgreSQL** implementing the complete 3-Tier Schema defined above.
+- Deploy a structured FastAPI (or Flask + asyncpg) cloud backend connected to **PostgreSQL** implementing the complete 3-Tier Canonical Schema defined in `cloud_schema.py`.
 
 ### Phase W4 — Discrete Sync & Offline Resilience Engine
-- Engineer a custom client-side storage adapter utilizing **IndexedDB** to intercept 10-minute summary posts and alert events, ensuring zero data loss during network blips.
+- Engineer a custom client-side storage adapter utilizing **IndexedDB** to intercept 5-minute summary posts and alert events, ensuring zero data loss during network blips.
 
 ### Phase W5 — Cloud Hosting Deployment
 - Configure Docker / Procfile deployment manifests for managed hosting platforms (Render, Railway, or Fly.io).
 
 ### Phase W6 — Cloud ML Personalization Engine
-- Adapt our existing nightly ML script to query `v_ml_training_pairs` directly from PostgreSQL by `subject_id`, applying strict **Chronological Time-Based Splitting** to eliminate time-series autocorrelation leakage.
-
----
-
-## Open Questions for User Approval
-1. **Hosting Platform Selection (Phase W5)**: Do you have a preferred managed provider among **Render, Railway, or Fly.io** for our Postgres DB and backend API?
-2. **Spike Initiation (Phase W1)**: With the schema architecture, calibration placement, sex/BMI additions, and 10-minute logging flow fully crystallized and agreed upon, are you ready for me to build the standalone **Phase W1 Web Serial + Pyodide verification spike** so we can test running your dual Arduinos directly inside your browser?
+- Adapt our existing nightly ML script to query `v_ml_training_pairs` directly from PostgreSQL by `user_name`, applying strict **Chronological Time-Based Splitting** to eliminate time-series autocorrelation leakage and segmenting models by `processing_version`.

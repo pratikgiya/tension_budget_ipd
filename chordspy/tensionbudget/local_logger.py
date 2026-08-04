@@ -3,8 +3,8 @@ Local Session Logger & User Profile Manager
 ===========================================
 Manages per-user local folders under `output_logs/<user_name>/`, saving profile
 metadata (`user_profile.json`), dynamic Age and BMI computations, and logging
-10-minute periodic ergonomic feature rows into wide-format CSVs ready for later
-manual ingestion into PostgreSQL.
+5-minute periodic ergonomic feature rows into wide-format CSVs with automatic
+cloud PostgreSQL / Supabase ingestion upon session completion.
 """
 
 import csv
@@ -16,6 +16,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 LOGS_ROOT = Path("output_logs")
+PROCESSING_VERSION = "phase11_edge_padding"
 
 CSV_HEADER = [
     "epoch_index",
@@ -43,13 +44,29 @@ CSV_HEADER = [
     "mdf_hz_left",
     "mnf_hz_left",
     "fatigue_slope_left",
+    "mdf_r_squared_left",
+    "n_windows_left",
     "mdf_computed_left",
     "is_fatiguing_left",
     "mdf_hz_right",
     "mnf_hz_right",
     "fatigue_slope_right",
+    "mdf_r_squared_right",
+    "n_windows_right",
     "mdf_computed_right",
     "is_fatiguing_right",
+    "strain_reported",
+    "subjective_strain_cr10",
+]
+
+RAW_CSV_HEADER = [
+    "sample_index",
+    "timestamp_s",
+    "epoch_index",
+    "raw_adc_left",
+    "raw_adc_right",
+    "strain_event_reported",
+    "subjective_strain_cr10",
 ]
 
 
@@ -61,6 +78,7 @@ class LocalSessionLogger:
         gender_sex: str = "Unspecified",
         weight_kg: float = None,
         height_cm: float = None,
+        db_uri: str = None,
     ):
         # Sanitize folder name (replace spaces and special chars with underscores)
         raw_name = user_name.strip() if user_name.strip() else "Anonymous_User"
@@ -73,10 +91,14 @@ class LocalSessionLogger:
         self.gender_sex = gender_sex
         self.weight_kg = weight_kg
         self.height_cm = height_cm
+        self.db_uri = db_uri or os.getenv("SUPABASE_DB_URI") or os.getenv("TENSION_BUDGET_DB_URI")
 
         self.session_timestamp_str = None
+        self.session_dir = None
         self.csv_path = None
         self.meta_path = None
+        self.raw_path = None
+        self.raw_buffer = []
         self.is_active = False
 
         # Compute dynamic metrics and save/update profile
@@ -147,8 +169,13 @@ class LocalSessionLogger:
         self.session_timestamp_str = now.strftime("%Y%m%d_%H%M%S")
         
         base_filename = f"session_{self.session_timestamp_str}"
-        self.csv_path = self.user_dir / f"{base_filename}_features.csv"
-        self.meta_path = self.user_dir / f"{base_filename}_metadata.json"
+        self.session_dir = self.user_dir / base_filename
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.csv_path = self.session_dir / f"{base_filename}_features.csv"
+        self.meta_path = self.session_dir / f"{base_filename}_metadata.json"
+        self.raw_path = self.session_dir / f"{base_filename}_raw.csv"
+        self.raw_buffer.clear()
 
         meta_data = {
             "session_id": self.session_timestamp_str,
@@ -158,6 +185,7 @@ class LocalSessionLogger:
             "start_time": now.isoformat(),
             "end_time": None,
             "status": "active",
+            "processing_version": PROCESSING_VERSION,
             "user_snapshot": {
                 "birth_date": self.birth_date_str,
                 "gender_sex": self.gender_sex,
@@ -178,16 +206,19 @@ class LocalSessionLogger:
         except Exception as e:
             print(f"Warning: Could not save session metadata: {e}")
 
-        # Write CSV Header
+        # Write CSV Headers
         try:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(CSV_HEADER)
+            with open(self.raw_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(RAW_CSV_HEADER)
         except Exception as e:
-            print(f"Warning: Could not initialize features CSV: {e}")
+            print(f"Warning: Could not initialize session CSVs: {e}")
 
         self.is_active = True
-        print(f"\n[LocalLogger] Session started for user '{self.user_name}' -> {self.csv_path}")
+        print(f"\n[LocalLogger] Session folder initialized for user '{self.user_name}' -> {self.session_dir}")
 
     def log_epoch(
         self,
@@ -200,8 +231,9 @@ class LocalSessionLogger:
         spectral_right_dict: dict,
         asymmetry_index: float,
         asymmetry_penalty_applied: bool,
+        subjective_strain_cr10: float = None,
     ):
-        """Appends one 10-minute epoch feature row to the session's CSV file."""
+        """Appends one 5-minute epoch feature row to the session's CSV file, using explicit boolean flags for missing Borg CR-10 data."""
         if not self.is_active or not self.csv_path:
             return
 
@@ -211,8 +243,17 @@ class LocalSessionLogger:
             v = d.get(key, default)
             return "" if v is None or (isinstance(v, float) and math.isnan(v)) else v
 
-        mdf_l = _val(spectral_left_dict, "mdf")
-        mdf_r = _val(spectral_right_dict, "mdf")
+        def _get_spec_mean(d, key):
+            series = d.get("spectral_series", {}).get(key, [])
+            valid = [x for x in series if x is not None and not (isinstance(x, float) and math.isnan(x))]
+            if valid and len(valid) > 0:
+                return round(float(sum(valid) / len(valid)), 4)
+            return ""
+
+        mdf_l = _get_spec_mean(spectral_left_dict, "mdf_hz")
+        mnf_l = _get_spec_mean(spectral_left_dict, "mnf_hz")
+        mdf_r = _get_spec_mean(spectral_right_dict, "mdf_hz")
+        mnf_r = _get_spec_mean(spectral_right_dict, "mnf_hz")
 
         row = [
             epoch_index,
@@ -238,15 +279,21 @@ class LocalSessionLogger:
             round(asymmetry_index, 4) if asymmetry_index is not None and not math.isnan(asymmetry_index) else "",
             "1" if asymmetry_penalty_applied else "0",
             mdf_l,
-            _val(spectral_left_dict, "mnf"),
+            mnf_l,
             _val(spectral_left_dict, "slope_hz_per_min"),
+            _val(spectral_left_dict, "r_squared"),
+            _val(spectral_left_dict, "n_windows"),
             "1" if mdf_l != "" else "0",  # mdf_computed_left explicit boolean
             "1" if spectral_left_dict.get("is_fatiguing", False) else "0",
             mdf_r,
-            _val(spectral_right_dict, "mnf"),
+            mnf_r,
             _val(spectral_right_dict, "slope_hz_per_min"),
+            _val(spectral_right_dict, "r_squared"),
+            _val(spectral_right_dict, "n_windows"),
             "1" if mdf_r != "" else "0",  # mdf_computed_right explicit boolean
             "1" if spectral_right_dict.get("is_fatiguing", False) else "0",
+            "1" if (subjective_strain_cr10 is not None and not (isinstance(subjective_strain_cr10, float) and (math.isnan(subjective_strain_cr10) or subjective_strain_cr10 < 0))) else "0",  # strain_reported boolean flag
+            round(float(subjective_strain_cr10), 1) if (subjective_strain_cr10 is not None and not (isinstance(subjective_strain_cr10, float) and (math.isnan(subjective_strain_cr10) or subjective_strain_cr10 < 0))) else "",  # NULL when unreported
         ]
 
         try:
@@ -256,6 +303,47 @@ class LocalSessionLogger:
             print(f"[LocalLogger] Logged epoch #{epoch_index} ({elapsed_minutes:.1f} min) to {self.csv_path.name}")
         except Exception as e:
             print(f"Warning: Could not append row to features CSV: {e}")
+
+    def log_raw_chunk(self, chunk_left: list, chunk_right: list, base_sample_idx: int, fs: float, epoch_idx: int):
+        """Buffers raw high-frequency telemetry waveforms and flushes once every second."""
+        if not self.is_active or not self.raw_path:
+            return
+        dt = 1.0 / max(1, fs)
+        rows = []
+        for idx, (l_val, r_val) in enumerate(zip(chunk_left, chunk_right)):
+            s_idx = base_sample_idx + idx
+            t_s = round(s_idx * dt, 4)
+            rows.append([s_idx, t_s, epoch_idx, round(float(l_val), 2), round(float(r_val), 2), 0, ""])
+        self.raw_buffer.extend(rows)
+        if len(self.raw_buffer) >= 500:
+            self.flush_raw_buffer()
+
+    def log_raw_strain_event(self, sample_idx: int, fs: float, epoch_idx: int, subjective_strain_cr10: float):
+        """Logs a sparse ground-truth target label event marker directly into the high-frequency raw stream."""
+        if not self.is_active or not self.raw_path or subjective_strain_cr10 is None:
+            return
+        try:
+            val = float(subjective_strain_cr10)
+            if math.isnan(val) or val < 0:
+                return
+        except (ValueError, TypeError):
+            return
+        dt = 1.0 / max(1, fs)
+        t_s = round(sample_idx * dt, 4)
+        self.raw_buffer.append([sample_idx, t_s, epoch_idx, "", "", 1, round(val, 1)])
+        self.flush_raw_buffer()
+
+    def flush_raw_buffer(self):
+        """Writes buffered raw rows to disk cleanly without IO bottlenecking."""
+        if not self.raw_buffer or not self.raw_path:
+            return
+        try:
+            with open(self.raw_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(self.raw_buffer)
+            self.raw_buffer.clear()
+        except Exception as e:
+            print(f"Warning: Could not write raw telemetry buffer: {e}")
 
     def update_calibration(self, calibration_left: float, calibration_right: float):
         """Updates the session metadata file when a live shrug calibration completes."""
@@ -272,6 +360,7 @@ class LocalSessionLogger:
 
     def end_session(self):
         """Marks the session as completed and updates end_time in metadata JSON."""
+        self.flush_raw_buffer()
         if not self.is_active or not self.meta_path or not self.meta_path.exists():
             return
         try:
@@ -281,8 +370,16 @@ class LocalSessionLogger:
             data["status"] = "completed"
             with open(self.meta_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
-            print(f"[LocalLogger] Session completed -> saved to {self.meta_path.name}")
+            print(f"[LocalLogger] Session completed -> saved to {self.session_dir}")
         except Exception as e:
             print(f"Warning: Could not finalize metadata JSON: {e}")
         finally:
             self.is_active = False
+            if hasattr(self, "db_uri") and self.db_uri:
+                try:
+                    from .cloud_ingest import sync_logs_to_postgres
+                    print(f"[LocalLogger] Automatically synchronizing completed session to cloud database...")
+                    sync_logs_to_postgres(log_dir=str(self.user_dir.parent), db_uri=self.db_uri, quiet=True)
+                    print(f"[LocalLogger] Automatic Supabase sync complete.")
+                except Exception as sync_err:
+                    print(f"[LocalLogger] Notice: Automatic cloud database sync skipped or failed: {sync_err}")
