@@ -65,8 +65,6 @@ RAW_CSV_HEADER = [
     "epoch_index",
     "raw_adc_left",
     "raw_adc_right",
-    "strain_event_reported",
-    "subjective_strain_cr10",
 ]
 
 
@@ -313,25 +311,10 @@ class LocalSessionLogger:
         for idx, (l_val, r_val) in enumerate(zip(chunk_left, chunk_right)):
             s_idx = base_sample_idx + idx
             t_s = round(s_idx * dt, 4)
-            rows.append([s_idx, t_s, epoch_idx, round(float(l_val), 2), round(float(r_val), 2), 0, ""])
+            rows.append([s_idx, t_s, epoch_idx, round(float(l_val), 2), round(float(r_val), 2)])
         self.raw_buffer.extend(rows)
         if len(self.raw_buffer) >= 500:
             self.flush_raw_buffer()
-
-    def log_raw_strain_event(self, sample_idx: int, fs: float, epoch_idx: int, subjective_strain_cr10: float):
-        """Logs a sparse ground-truth target label event marker directly into the high-frequency raw stream."""
-        if not self.is_active or not self.raw_path or subjective_strain_cr10 is None:
-            return
-        try:
-            val = float(subjective_strain_cr10)
-            if math.isnan(val) or val < 0:
-                return
-        except (ValueError, TypeError):
-            return
-        dt = 1.0 / max(1, fs)
-        t_s = round(sample_idx * dt, 4)
-        self.raw_buffer.append([sample_idx, t_s, epoch_idx, "", "", 1, round(val, 1)])
-        self.flush_raw_buffer()
 
     def flush_raw_buffer(self):
         """Writes buffered raw rows to disk cleanly without IO bottlenecking."""
@@ -359,8 +342,20 @@ class LocalSessionLogger:
             print(f"Warning: Could not update calibration in metadata JSON: {e}")
 
     def end_session(self):
-        """Marks the session as completed and updates end_time in metadata JSON."""
+        """Marks the session as completed, compresses raw telemetry to Parquet, and updates metadata JSON."""
         self.flush_raw_buffer()
+        # Convert staging raw CSV into ultra-compressed Parquet archive
+        if self.raw_path and self.raw_path.exists():
+            try:
+                import pandas as pd
+                parquet_path = self.raw_path.with_suffix(".parquet")
+                df_raw = pd.read_csv(self.raw_path)
+                df_raw.to_parquet(parquet_path, index=False)
+                self.raw_path.unlink(missing_ok=True)
+                print(f"[LocalLogger] Compressed raw high-frequency telemetry to Parquet: {parquet_path.name}")
+                self.raw_path = parquet_path
+            except Exception as e:
+                print(f"Warning: Could not compress raw telemetry to Parquet (retaining plain CSV): {e}")
         if not self.is_active or not self.meta_path or not self.meta_path.exists():
             return
         try:

@@ -196,6 +196,35 @@
         <div class="stat-card">
           <div class="stat-label">Sub-10ms SLA</div>
           <div class="stat-value emerald" id="bench-sla">PENDING</div>
+      </div>
+    </section>
+
+    <!-- Session Vault Data Export Deck -->
+    <section class="glass-panel full-width" id="deck-data-vault" style="border: 1px solid var(--neon-emerald);">
+      <div class="panel-header">
+        <h2 class="panel-title">💾 Session Vault & Data Export Suite</h2>
+        <span class="badge badge-emerald">Phase W3 Local Preservation</span>
+      </div>
+      <p style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 1.5rem; line-height: 1.5;">
+        Export standard Phase 12 / W3 compatible recording archives directly to your filesystem. The 500 Hz high-frequency raw file adheres to the untouched 5-column Stage-1 physical acquisition schema and can be converted into multi-sheet Excel workbooks using our command-line conversion utility (<code>scripts/export_raw_to_excel.py</code>).
+      </p>
+      <div class="button-group" style="display: flex; gap: 1rem; flex-wrap: wrap;">
+        <button id="btn-dl-raw" class="btn-neon btn-emerald">📥 Download 500 Hz Raw ADC Waveforms (_raw.csv)</button>
+        <button id="btn-dl-features" class="btn-neon btn-cyan">📥 Download Feature Exposure Summary (_features.csv)</button>
+        <button id="btn-dl-metadata" class="btn-neon btn-purple">📥 Download Session Metadata (_metadata.json)</button>
+      </div>
+      <div class="telemetry-grid" style="margin-top: 1.5rem;">
+        <div class="stat-card">
+          <div class="stat-label">Buffered Raw ADC Samples</div>
+          <div class="stat-value emerald" id="val-buffered-raw">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Raw Telemetry Schema</div>
+          <div class="stat-value cyan">5-COLUMN STAGE-1 PURE</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Offline Excel Split Compatibility</div>
+          <div class="stat-value purple">export_raw_to_excel.py</div>
         </div>
       </div>
     </section>

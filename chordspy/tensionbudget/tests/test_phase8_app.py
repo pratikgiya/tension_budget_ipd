@@ -162,6 +162,14 @@ class TestAppLoggerIntegration:
                 f"Expected processing_version 'phase11_edge_padding', got {meta_data.get('processing_version')}"
             )
 
+            # Verify high-frequency raw telemetry file was compressed to Parquet and follows the 5-column pure schema
+            raw_path = win.local_logger.raw_path
+            assert raw_path.suffix == ".parquet", f"Expected .parquet extension, got {raw_path}"
+            assert raw_path.exists(), f"Expected Parquet file to exist at {raw_path}"
+            import pandas as pd
+            df_raw = pd.read_parquet(raw_path)
+            assert list(df_raw.columns) == ["sample_index", "timestamp_s", "epoch_index", "raw_adc_left", "raw_adc_right"]
+
         finally:
             local_logger.LOGS_ROOT = orig_logs_root
 

@@ -521,4 +521,40 @@ Executed a comprehensive architectural upgrade to establish the foundation for B
 - Executed and verified **73 / 73 passing unit and regression tests** (`python -m pytest -v`, execution time: 3.37s) with zero regressions in mathematical calculations or cloud schema initialization.
 
 ### Next phase
-Phase W3 — Service Worker Caching & Offline PWA Persistence (or Cloud PostgreSQL Dataset Ingestion & Bayesian Model Exploration).
+Phase W3 — Dedicated Session Vault, 500 Hz Raw Telemetry Streaming & Interactive Borg CR-10 Popup Dialogs. Completed.
+---
+
+## Phase W3 — Dedicated Session Vault, 500 Hz Raw Telemetry Streaming & Interactive Borg CR-10 Popup Dialogs
+Timestamp: 2026-08-04T21:00:00+05:30
+Status: Completed
+
+### Summary
+Implemented three major structural upgrades across our local data persistence layer, high-frequency waveform recording engine, and graphical user interface to fulfill Bayesian Hierarchical Modeling capabilities and eliminate missed self-reports:
+1. **Dedicated Session Directories (`output_logs/<user>/session_<timestamp>/`)**:
+   - Refactored `LocalSessionLogger` (`chordspy/tensionbudget/local_logger.py`) to abandon flat file clobbering in favor of dedicated, self-contained subdirectories per session.
+   - Each recording session now outputs a perfectly matched trio of artifacts: `session_<timestamp>_metadata.json`, `session_<timestamp>_features.csv` (Clock 2 38-column summary matrix), and `session_<timestamp>_raw.csv`.
+   - Upgraded database synchronization (`chordspy/tensionbudget/cloud_ingest.py`) to implement recursive pattern globbing (`**/*_metadata.json`), ensuring seamless cloud database ingestion across deep folder trees.
+2. **500 Hz Raw Telemetry Archival & Relational `epoch_index` Binding (`_raw.csv`)**:
+   - Implemented `log_raw_chunk()` in `LocalSessionLogger` to buffer incoming high-frequency 500 Hz multichannel sEMG samples in RAM and flush to disk cleanly once per second (500-sample chunks), completely insulating Windows IO disk throughput from 50 Hz UI rendering loops.
+   - Designed and locked `RAW_CSV_HEADER` (`sample_index, timestamp_s, epoch_index, raw_adc_left, raw_adc_right`). Every raw electrical sample is relationally bound to its corresponding 5-minute `epoch_index`, keeping `session_raw.csv` completely pure as an untouched Stage-1 physical acquisition stream without mixing derived target reports. Downstream modeling joins waveforms to sparse self-report feature targets via SQL or PyTorch (`SELECT * FROM raw JOIN features USING (epoch_index) WHERE f.strain_reported = 1`).
+3. **Interactive Borg CR-10 Popup Modal (`BorgStrainPopupDialog`)**:
+   - Engineered an asynchronous, non-blocking modal dialog window (`BorgStrainPopupDialog(QDialog)`) in `chordspy/tensionbudget_app.py` that automatically triggers when a 5-minute epoch boundary (`300` seconds) is crossed during live hardware monitoring.
+   - **No Thread Blocking**: Opens via `.open(lambda: ...)`, permitting background 500 Hz serial acquisition and live canvas plotting to proceed without losing a single LSL data frame while awaiting subject input.
+   - **No Forward-Filling / Stale Defaults**: Resolves prior subjective strain data leakage by logging submitted Borg CR-10 ratings directly into `_features.csv`, immediately resetting the active interface selection back to `[NULL] Unreported / Skip` for future epochs.
+
+### Files modified
+- `chordspy/tensionbudget/local_logger.py` — Implemented session subdirectory creation, 5-column pure `RAW_CSV_HEADER`, `log_raw_chunk()`, and `flush_raw_buffer()`.
+- `chordspy/tensionbudget/cloud_ingest.py` — Upgraded file discovery loop in `ingest_directory` to recursive glob pattern (`**/*_metadata.json`).
+- `chordspy/tensionbudget_app.py` — Added PyQt5 dialog imports, implemented `BorgStrainPopupDialog`, integrated raw telemetry streaming in `update_loop`, and wired asynchronous popup triggering via `_trigger_epoch_logging()`.
+- `TENSIONBUDGET_ONBOARDING_GUIDE.md` — Documented 5-minute epoch cadence, dedicated session folder architecture, raw waveform logs, and interactive popup dialog behaviors.
+
+### Test Summary
+- Executed and verified **73 / 73 passing unit, math, and regression tests** (`python -m pytest -v`, execution time: 32.98s) with zero regressions in mathematical calculations, spectral fatigue slopes, or EIndex bounding.
+
+### Next phase & Pending Deliverables (Set Aside for Live Hardware Testing)
+We previously set aside two web and export feature requirements when pausing to conduct our dual-Arduino hardware live testing:
+1. **Web Interface Raw Telemetry & Metadata Download (`web_spike/`)**:
+   - Currently, the web interface only exports processed CSV summary data. Upgrade `web_spike/` (`app.js`, `index.html`) so users running browser-based Wasm monitoring can download two dedicated files per session: the **high-frequency raw values CSV** and the **standardized session metadata JSON** (containing timestamps, user profile snapshot, mode, and calibration references).
+2. **Multi-Tab Excel Raw Data Splitter / Export Utility**:
+   - Implement a specialized CLI export script that parses large multi-million row 500 Hz raw telemetry files and chunks them into split Excel worksheet tabs (e.g., Tab 1: 0–1,000,000 rows, Tab 2: 1,000,001–2,000,000 rows) to bypass spreadsheet software row limits during physical therapy offline reviews.
+

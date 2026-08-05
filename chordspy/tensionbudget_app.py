@@ -829,9 +829,6 @@ class TensionBudgetApp(QMainWindow):
     def _on_borg_popup_finished(self, dialog, epoch_idx):
         self.current_strain_rating = dialog.selected_rating
         self._log_current_epoch(epoch_idx=epoch_idx, is_final=False)
-        # Record sparse target event into high-frequency raw telemetry stream
-        if self.local_logger and self.local_logger.is_active and self.current_strain_rating is not None:
-            self.local_logger.log_raw_strain_event(self.session_sample_count, self.sampling_rate, epoch_idx, self.current_strain_rating)
         # Reset rating to NULL after logging so future epochs require explicit evaluation
         self.current_strain_rating = None
         if hasattr(self, "strain_combo"):
