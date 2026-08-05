@@ -61,6 +61,12 @@ Install the required packages (`pylsl`, `PyQt5`, `pyqtgraph`, `scipy`, `pandas`,
 pip install -r requirements.txt
 ```
 
+### Step 4: Database Credential Setup & Cloud Sync (Collaborator Onboarding)
+To enable automatic, firewall-immune synchronization to our shared cloud research database without exposing private credentials in git commits:
+1. Duplicate the `.env.example` template file in the project root and save it as `.env`.
+2. Request the public project **Supabase Anon Key** from the research lead and paste it into `SUPABASE_ANON_KEY=...` inside your local `.env` file. (Note: The `.env` file is permanently ignored by git in `.gitignore` and will never leak online).
+3. The application features an **automatic zero-dependency loader**: whenever you launch the GUI or execute CLI ingestion scripts, Python reads `.env` directly from disk into memory. You do not need to manually set operating system environment variables!
+
 ---
 
 ## 3. Running the Standalone Monitor App
@@ -101,8 +107,8 @@ Because dual USB serial microcontrollers operate on distinct COM ports, we use a
 ```powershell
 python start_lsl_stream.py
 ```
-* **What this does**: Automatically connects to **COM6** (Left Trapezius, Pin A2 @ 230,400 baud) and **COM5** (Right Trapezius, Pin A2 @ 230,400 baud), handshakes binary packet streaming without Win32 driver buffer locks, and broadcasts a synchronized 500 Hz 2-channel bilateral stream named `'Chords_EMG_Bilateral'`.
-* *(Note: If your Windows Device Manager assigns different COM ports, open `start_lsl_stream.py` and modify `PORT_L = 'COM6'` and `PORT_R = 'COM5'` to match your setup).*
+* **What this does**: Automatically scans your operating system (Windows, macOS, or Linux) to detect connected USB/Serial acquisition devices without requiring hardcoded COM port numbers. It handshakes binary packet streaming without driver buffer locks, and broadcasts a synchronized 500 Hz 2-channel bilateral stream named `'Chords_EMG_Bilateral'`.
+* *(Note: If you have more than two serial devices attached or wish to override the order of Left and Right shoulders, you can explicitly pass port names via CLI flags: `python start_lsl_stream.py --left COM3 --right COM4` or `--left /dev/ttyUSB0 --right /dev/ttyUSB1`).*
 
 #### Step 2: Connect to the LSL Stream in the App (Terminal 2)
 1. In a second terminal window, launch the application: `python chordspy/tensionbudget_app.py`.
@@ -140,7 +146,7 @@ output_logs/
 * **Relational `epoch_index` Binding & Raw Integrity**: The high-frequency raw telemetry file (`_raw.csv`) logs every individual 500 Hz waveform sample with an explicit `epoch_index` column. This renders downstream analysis completely immune to sample-rate jitters or temporary serial packet drops—researchers can effortlessly join dense high-frequency waveforms to sparse 5-minute feature targets in PyTorch or PostgreSQL (`SELECT * FROM raw JOIN features USING (epoch_index)`).
 * **Interactive Borg CR-10 Popup Modal**: To prevent forgotten self-reports or stale forward-filling, a non-blocking dialog pops up at every 5-minute epoch mark prompting the user for their perceived muscular strain on the continuous `0.0–10.0` Borg CR-10 scale. Submitting a score logs it strictly into `session_features.csv` ($y$), preserving `session_raw.csv` as an untouched 5-column Stage-1 physical acquisition stream (`sample_index, timestamp_s, epoch_index, raw_adc_left, raw_adc_right`) that joins cleanly back to features via `epoch_index`.
 * **Explicit Missingness Flags**: Unrecorded or skipped ratings are recorded with `strain_reported = 0` and empty strings `""` (SQL `NULL`), eliminating `-1.0` sentinel distortion from Bayesian Hierarchical Model priors.
-* **Automated Cloud DB Synchronization**: Upon session completion, `sync_logs_to_postgres` recursively discovers metadata and feature tables across all session folders and idempotently upserts them into cloud PostgreSQL / Supabase databases.
+* **Offline Disk-First Storage & Firewall-Immune Cloud Sync**: **Local offline storage in `output_logs/` is the unconditional primary source of truth.** During live data recordings, the application makes zero network calls, ensuring continuous telemetry capture even without Wi-Fi. Upon pressing "Stop Recording," `end_session()` first safely persists all CSVs, Parquet waveform archives, and JSON manifests to disk. Only then does it perform a non-blocking background sync to Supabase over standard **HTTPS (Port 443)** via our Edge Function gateway—bypassing corporate/campus database port blocking (`5432`/`6543`). If network synchronization fails or Wi-Fi is offline, local disk files remain fully intact for batch uploading later via `python -m scripts.ingest_to_postgres --log-dir output_logs`.
 
 ---
 

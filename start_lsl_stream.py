@@ -14,16 +14,18 @@ Run from repo root (with .venv active):
     python start_lsl_stream.py
 """
 
+import argparse
 import serial
+import serial.tools.list_ports
 import time
 import sys
 import threading
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
-LEFT_PORT   = "COM6"    # COM port for Left shoulder Arduino
-RIGHT_PORT  = "COM5"    # COM port for Right shoulder Arduino
-PIN_INDEX   = 2         # Analog Pin A2 corresponds to raw packet slot index 2
-BAUDRATES   = [230400, 115200]
+DEFAULT_LEFT_PORT   = "AUTO"    # Automatically detect Left shoulder Arduino
+DEFAULT_RIGHT_PORT  = "AUTO"    # Automatically detect Right shoulder Arduino
+PIN_INDEX           = 2         # Analog Pin A2 corresponds to raw packet slot index 2
+BAUDRATES           = [230400, 115200]
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── LSL Import ────────────────────────────────────────────────────────────────
@@ -53,6 +55,46 @@ SUPPORTED_BOARDS = {
 latest_samples = {"left": 0.0, "right": 0.0}
 running = True
 packet_counters = {"left": 0, "right": 0}
+
+
+def auto_detect_serial_ports(left_req: str = "AUTO", right_req: str = "AUTO") -> tuple[str | None, str | None]:
+    """Automatically discover active USB/Serial acquisition devices without hardcoded COM names."""
+    if left_req != "AUTO" and right_req != "AUTO":
+        return left_req, right_req
+
+    print("🔍 Searching operating system for active USB/Serial hardware devices...")
+    all_ports = serial.tools.list_ports.comports()
+    candidates = []
+    for p in all_ports:
+        # Exclude common system Bluetooth and internal virtual modem ports
+        desc = (p.description or "").upper()
+        hwid = (p.hwid or "").upper()
+        if "BLUETOOTH" not in desc and "MODEM" not in desc and "BTPROPERTIES" not in hwid:
+            candidates.append(p)
+
+    if not candidates:
+        print("⚠️ No available USB/Serial hardware devices detected on this machine.")
+        print("   Please check that your Arduino boards are securely plugged in via USB and drivers are installed.")
+        return None, None
+
+    print(f"✅ Discovered {len(candidates)} compatible hardware serial device(s):")
+    for idx, p in enumerate(candidates, start=1):
+        print(f"   [{idx}] Device Port: {p.device} | Description: {p.description}")
+
+    left_port = left_req
+    right_port = right_req
+
+    if len(candidates) < 2 and (left_req == "AUTO" or right_req == "AUTO"):
+        print(f"\n⚠️ WARNING: TensionBudget bilateral monitoring requires TWO independent hardware ports (Left & Right).")
+        print(f"   Only {len(candidates)} device(s) found on this machine.")
+
+    if left_port == "AUTO":
+        left_port = candidates[0].device if len(candidates) >= 1 else None
+    if right_port == "AUTO":
+        # Select second device if available, otherwise fallback to same port or None
+        right_port = candidates[1].device if len(candidates) >= 2 else (candidates[0].device if len(candidates) == 1 else None)
+
+    return left_port, right_port
 
 
 def connect_board(port: str) -> serial.Serial | None:
@@ -171,18 +213,29 @@ def reader_thread(ser: serial.Serial, side: str, push_lsl: bool, outlet: StreamO
 
 def main():
     global running, packet_counters
-    print("=" * 64)
-    print("  TensionBudget — Dual-Arduino USB-to-LSL Bridge")
-    print("=" * 64)
-    print(f"  Target Configuration: Left = {LEFT_PORT} (Pin A2), Right = {RIGHT_PORT} (Pin A2)")
-    print("  Connecting to hardware...")
+    parser = argparse.ArgumentParser(description="TensionBudget Dual-Arduino Automatic USB-to-LSL Bridge")
+    parser.add_argument("--left", dest="left_port", default=DEFAULT_LEFT_PORT, help="Explicit serial port for Left Trapezius (default: AUTO)")
+    parser.add_argument("--right", dest="right_port", default=DEFAULT_RIGHT_PORT, help="Explicit serial port for Right Trapezius (default: AUTO)")
+    args = parser.parse_args()
 
-    ser_left = connect_board(LEFT_PORT)
-    ser_right = connect_board(RIGHT_PORT)
+    print("=" * 64)
+    print("  TensionBudget — Dual-Arduino USB-to-LSL Bridge (Auto-Discovery)")
+    print("=" * 64)
+
+    left_port, right_port = auto_detect_serial_ports(args.left_port, args.right_port)
+    if not left_port or not right_port:
+        print("\n❌ Aborting stream: Failed to identify required Left and Right trapezius serial ports.")
+        print("   If testing on custom hardware, pass explicit ports via CLI: python start_lsl_stream.py --left COM3 --right COM4")
+        sys.exit(1)
+
+    print(f"\n🚀 Engaging Bilateral Hardware Bridge -> Left: {left_port} | Right: {right_port}")
+    print("   Handshaking active high-frequency digital telemetry...")
+
+    ser_left = connect_board(left_port)
+    ser_right = connect_board(right_port)
 
     if not ser_left or not ser_right:
-        print("\n❌ Could not connect to BOTH Arduinos.")
-        print(f"   Check your USB connections: {LEFT_PORT} and {RIGHT_PORT} must be accessible.")
+        print(f"\n❌ Could not establish handshakes with BOTH devices ({left_port} and {right_port}).")
         if ser_left: ser_left.close()
         if ser_right: ser_right.close()
         sys.exit(1)
@@ -201,9 +254,9 @@ def main():
     res_node.append_child_value("resolution", str(RESOLUTION))
 
     outlet = StreamOutlet(info)
-    print(f"\n✅ Dual-Arduino LSL bilateral stream started!")
-    print(f"   Channel 0 → Left EMG  ({LEFT_PORT}, Pin A2)")
-    print(f"   Channel 1 → Right EMG ({RIGHT_PORT}, Pin A2)")
+    print(f"\n✅ Dual-Arduino LSL bilateral stream active and broadcasting!")
+    print(f"   Channel 0 → Left EMG  ({left_port}, Pin A2)")
+    print(f"   Channel 1 → Right EMG ({right_port}, Pin A2)")
     print(f"   Sampling rate: ~{SAMPLING_RATE} Hz")
     print(f"\n   NOW launch TensionBudget Monitor in your second terminal:")
     print(f"   python -m chordspy.tensionbudget_app")
@@ -225,7 +278,7 @@ def main():
                 elapsed = now - last_report
                 rate_l = packet_counters["left"] / elapsed
                 rate_r = packet_counters["right"] / elapsed
-                print(f"  Streaming… Rates: Left ({LEFT_PORT}) = {rate_l:.0f} Hz  |  Right ({RIGHT_PORT}) = {rate_r:.0f} Hz")
+                print(f"  Streaming… Rates: Left ({left_port}) = {rate_l:.0f} Hz  |  Right ({right_port}) = {rate_r:.0f} Hz")
                 packet_counters["left"] = 0
                 packet_counters["right"] = 0
                 last_report = now

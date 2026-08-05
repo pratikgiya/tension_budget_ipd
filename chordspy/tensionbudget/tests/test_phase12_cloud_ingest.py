@@ -23,7 +23,7 @@ class TestPhase12CloudIngestion:
         conn.close()
 
     def test_schema_creation_and_view(self, mem_db):
-        """Verify that all 4 tables and the ML training pair SQL view are instantiated cleanly."""
+        """Verify that all 3 tables and the ML training pair SQL view are instantiated cleanly."""
         cursor = mem_db.cursor()
         cursor.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view');")
         objects = {row[0]: row[1] for row in cursor.fetchall()}
@@ -31,7 +31,6 @@ class TestPhase12CloudIngestion:
         assert "user_profiles" in objects and objects["user_profiles"] == "table"
         assert "sessions" in objects and objects["sessions"] == "table"
         assert "epoch_features" in objects and objects["epoch_features"] == "table"
-        assert "self_reports" in objects and objects["self_reports"] == "table"
         assert "v_ml_training_pairs" in objects and objects["v_ml_training_pairs"] == "view"
 
     def test_idempotence_and_version_segmentation(self, mem_db, tmp_path):

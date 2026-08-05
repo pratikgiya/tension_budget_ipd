@@ -338,7 +338,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Web Serial Port Connection Gateways (COM6 Left / COM5 Right)
+  // Web Serial Port Connection Gateways (Auto-Discovered Left & Right Interfaces)
   async function connectSerialPort(channelName, targetBaudRate) {
     if (!("serial" in navigator)) {
       alert("Web Serial API is not natively enabled in this browser. Use Chrome/Edge or activate the built-in Live 500Hz Stream Emulator above!");
@@ -358,8 +358,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
   
-  btnConnectLeft.addEventListener("click", () => connectSerialPort("Left (COM6)", 230400));
-  btnConnectRight.addEventListener("click", () => connectSerialPort("Right (COM5)", 230400));
+  btnConnectLeft.addEventListener("click", () => connectSerialPort("Left Trapezius", 230400));
+  btnConnectRight.addEventListener("click", () => connectSerialPort("Right Trapezius", 230400));
 
   // Session Vault Browser Download Handlers
   function triggerBlobDownload(content, filename, mimeType) {

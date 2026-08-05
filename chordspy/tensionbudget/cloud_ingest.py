@@ -7,11 +7,35 @@ safely segments legacy pre-Phase 11 sessions with the 'legacy_constant_padding' 
 """
 
 import csv
+import hashlib
+import hmac
 import json
 import sqlite3
+import secrets
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from .config import TBConfig
+
+def hash_password(password: str) -> str:
+    """Hashes a plaintext password using PBKDF2-HMAC-SHA256 with a random salt."""
+    salt = secrets.token_hex(16)
+    hashed_bytes = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return f"pbkdf2:sha256:100000${salt}${hashed_bytes.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verifies a plaintext password against a stored PBKDF2 hash."""
+    if not stored_hash or not stored_hash.startswith("pbkdf2:sha256:"):
+        return False
+    parts = stored_hash.split("$")
+    if len(parts) != 3:
+        return False
+    salt, expected_hex = parts[1], parts[2]
+    computed_bytes = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return hmac.compare_digest(computed_bytes.hex(), expected_hex)
 
 
 def _parse_val(val: Any, val_type: str = "float") -> Any:
@@ -33,12 +57,45 @@ def _parse_val(val: Any, val_type: str = "float") -> Any:
     return val
 
 
-def ingest_session_pair(conn: Any, json_path: Path, csv_path: Path) -> Dict[str, Any]:
+class UniversalCursor:
+    """Wraps a DB-API cursor to seamlessly translate SQLite placeholders (?) to PostgreSQL (%s) when connecting to Postgres."""
+    def __init__(self, raw_cursor, is_postgres: bool):
+        self._cursor = raw_cursor
+        self._is_pg = is_postgres
+
+    def execute(self, sql: str, params=None):
+        if self._is_pg and "?" in sql:
+            sql = sql.replace("?", "%s")
+        if params is not None:
+            return self._cursor.execute(sql, params)
+        return self._cursor.execute(sql)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+def ingest_session_pair(
+    conn: Any,
+    json_path: Path,
+    csv_path: Path,
+    password: Optional[str] = None,
+    interactive: bool = False,
+    created_via: str = "desktop_registration"
+) -> Dict[str, Any]:
     """
     Ingests a matched pair of session metadata JSON and feature CSV into the database connection.
+    Enforces password gating BEFORE any write operation to prevent accidental subject data corruption.
     Returns summary statistics for the ingested session.
     """
-    cursor = conn.cursor()
+    raw_cursor = conn.cursor()
+    is_pg = "psycopg" in str(type(conn)).lower() or "postgres" in str(type(conn)).lower()
+    cursor = UniversalCursor(raw_cursor, is_pg)
 
     with open(json_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -51,9 +108,40 @@ def ingest_session_pair(conn: Any, json_path: Path, csv_path: Path) -> Dict[str,
     weight_kg = _parse_val(user_prof.get("weight_kg"), "float")
     height_cm = _parse_val(user_prof.get("height_cm"), "float")
 
-    # Tier 1: Upsert User Profile
-    cursor.execute("SELECT user_name FROM user_profiles WHERE user_name = ?", (user_name,))
-    if cursor.fetchone():
+    # ── Password Gating & Subject Data Integrity Check ────────────────────────
+    try:
+        cursor.execute("SELECT user_name, password_hash FROM user_profiles WHERE user_name = ?", (user_name,))
+        existing = cursor.fetchone()
+    except sqlite3.OperationalError:
+        existing = None
+
+    if existing and len(existing) > 1 and existing[1]:
+        # Existing subject with stored password — verify BEFORE proceeding
+        stored_hash = existing[1]
+        if not password and interactive:
+            import getpass
+            password = getpass.getpass(f"[AUTH REQUIRED] Subject '{user_name}' is password protected. Enter password: ")
+        if not password or not verify_password(password, stored_hash):
+            raise PermissionError(f"Data Integrity Error: Invalid or missing password for subject '{user_name}'. Ingestion rejected to prevent silent data corruption.")
+    else:
+        # New user (or existing legacy profile without password) — set up password if provided/interactive
+        if not password and interactive:
+            import getpass
+            password = getpass.getpass(f"[NEW SUBJECT] Subject '{user_name}' detected — set a password for data protection: ")
+        new_hash = hash_password(password) if password else None
+        
+        if not existing:
+            cursor.execute(
+                """
+                INSERT INTO user_profiles (user_name, birth_date, gender_sex, weight_kg, height_cm, updated_at, password_hash, created_via)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_name, birth_date, gender_sex, weight_kg, height_cm, time.time(), new_hash, created_via)
+            )
+        elif new_hash:
+            cursor.execute("UPDATE user_profiles SET password_hash = ? WHERE user_name = ?", (new_hash, user_name))
+
+    if existing:
         cursor.execute(
             """
             UPDATE user_profiles 
@@ -61,14 +149,6 @@ def ingest_session_pair(conn: Any, json_path: Path, csv_path: Path) -> Dict[str,
             WHERE user_name = ?
             """,
             (birth_date, gender_sex, weight_kg, height_cm, time.time(), user_name)
-        )
-    else:
-        cursor.execute(
-            """
-            INSERT INTO user_profiles (user_name, birth_date, gender_sex, weight_kg, height_cm, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (user_name, birth_date, gender_sex, weight_kg, height_cm, time.time())
         )
 
     # Tier 2: Upsert Session Metadata & Processing Version Segmentation
@@ -202,9 +282,16 @@ def ingest_session_pair(conn: Any, json_path: Path, csv_path: Path) -> Dict[str,
     }
 
 
-def ingest_directory(conn: Any, directory_path: Path) -> Dict[str, Any]:
+def ingest_directory(
+    conn: Any,
+    directory_path: Path,
+    password: Optional[str] = None,
+    interactive: bool = False,
+    created_via: str = "desktop_registration"
+) -> Dict[str, Any]:
     """
     Scans a directory for all pairs of *_metadata.json and *_features.csv, ingesting each pair idempotently into the DB.
+    Enforces password gating on subject accounts.
     """
     dir_path = Path(directory_path)
     if not dir_path.exists() or not dir_path.is_dir():
@@ -217,7 +304,8 @@ def ingest_directory(conn: Any, directory_path: Path) -> Dict[str, Any]:
         "epochs_ingested": 0,
         "modern_sessions_count": 0,
         "legacy_sessions_count": 0,
-        "sessions": []
+        "sessions": [],
+        "failures": []
     }
 
     for j_path in json_files:
@@ -225,13 +313,181 @@ def ingest_directory(conn: Any, directory_path: Path) -> Dict[str, Any]:
         if not csv_path.exists():
             continue  # Skip un-paired incomplete logs
 
-        res = ingest_session_pair(conn, j_path, csv_path)
-        report["total_sessions"] += 1
-        report["epochs_ingested"] += res["epochs_ingested"]
-        report["sessions"].append(res)
-        if res["processing_version"] == "legacy_constant_padding":
-            report["legacy_sessions_count"] += 1
-        else:
-            report["modern_sessions_count"] += 1
+        try:
+            res = ingest_session_pair(conn, j_path, csv_path, password=password, interactive=interactive, created_via=created_via)
+            report["total_sessions"] += 1
+            report["epochs_ingested"] += res["epochs_ingested"]
+            report["sessions"].append(res)
+            if res["processing_version"] == "legacy_constant_padding":
+                report["legacy_sessions_count"] += 1
+            else:
+                report["modern_sessions_count"] += 1
+        except PermissionError as e:
+            print(f"\n[REJECTED] {j_path.parent.name}: {str(e)}")
+    return report
+
+
+def ingest_session_pair_via_http(
+    json_path: Path,
+    csv_path: Path,
+    endpoint_url: str,
+    anon_key: Optional[str] = None,
+    password: Optional[str] = None,
+    interactive: bool = False
+) -> Dict[str, Any]:
+    """
+    Transmits a session metadata & feature CSV pair over standard HTTPS (Port 443) to the deployed Edge Function.
+    Bypasses corporate and campus database port blocking (ports 5432/6543) while enforcing server-side password gating.
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    session_id = str(meta.get("session_id", json_path.stem.replace("_metadata", "")))
+    user_prof = meta.get("user_profile", {})
+    user_name = str(user_prof.get("user_name", "Anonymous"))
+    proc_version = meta.get("processing_version", "legacy_constant_padding")
+
+    if not password and interactive:
+        import getpass
+        password = getpass.getpass(f"[AUTH REQUIRED] Enter password for subject '{user_name}': ")
+
+    int_cols = {"epoch_index", "asymmetry_penalty_applied", "mdf_computed_left", "is_fatiguing_left", "mdf_computed_right", "is_fatiguing_right", "strain_reported"}
+
+    epoch_features = []
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            epoch_idx = _parse_val(row.get("epoch_index"), "int")
+            if epoch_idx is None:
+                continue
+            item = {"session_id": session_id}
+            for k, v in row.items():
+                if k == "timestamp":
+                    continue
+                v_type = "int" if k in int_cols else "float"
+                parsed_val = _parse_val(v, v_type)
+                if parsed_val is not None:
+                    item[k] = parsed_val
+            epoch_features.append(item)
+
+    payload = {
+        "user_name": user_name,
+        "password": password or "",
+        "session_metadata": {
+            "session_id": session_id,
+            "start_time": _parse_val(meta.get("start_time"), "float"),
+            "start_time_str": meta.get("start_time_str", ""),
+            "end_time": _parse_val(meta.get("end_time"), "float"),
+            "end_time_str": meta.get("end_time_str", ""),
+            "mode": meta.get("mode", "unknown"),
+            "calibration": meta.get("calibration_baselines_mv", meta.get("calibration", {})),
+            "processing_version": proc_version,
+            "user_profile": user_prof,
+            "self_reports": meta.get("self_reports", [])
+        },
+        "epoch_features": epoch_features
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if anon_key:
+        headers["apikey"] = anon_key
+        headers["Authorization"] = f"Bearer {anon_key}"
+
+    req = urllib.request.Request(endpoint_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8")
+        try:
+            err_msg = json.loads(err_body).get("error", str(e))
+        except Exception:
+            err_msg = err_body or str(e)
+        raise PermissionError(f"Cloud Ingestion Rejected (HTTP {e.code}): {err_msg}")
+    except Exception as e:
+        raise RuntimeError(f"Cloud Ingestion Failed: {str(e)}")
+
+    return {
+        "session_id": session_id,
+        "user_name": user_name,
+        "processing_version": proc_version,
+        "epochs_ingested": len(epoch_features),
+        "status": "success"
+    }
+
+
+def ingest_directory_via_http(
+    directory_path: Path,
+    endpoint_url: str,
+    anon_key: Optional[str] = None,
+    password: Optional[str] = None,
+    interactive: bool = False
+) -> Dict[str, Any]:
+    """
+    Scans a local log directory and synchronizes all session pairs over HTTPS to the deployed Edge Function.
+    """
+    dir_path = Path(directory_path)
+    if not dir_path.exists() or not dir_path.is_dir():
+        return {"error": f"Directory {directory_path} does not exist or is not a directory.", "total_sessions": 0}
+
+    json_files = list(dir_path.glob("**/*_metadata.json"))
+    report = {
+        "total_sessions": 0,
+        "epochs_ingested": 0,
+        "modern_sessions_count": 0,
+        "legacy_sessions_count": 0,
+        "sessions": [],
+        "failures": []
+    }
+
+    for j_path in json_files:
+        csv_path = Path(str(j_path).replace("_metadata.json", "_features.csv"))
+        if not csv_path.exists():
+            continue
+
+        try:
+            res = ingest_session_pair_via_http(j_path, csv_path, endpoint_url=endpoint_url, anon_key=anon_key, password=password, interactive=interactive)
+            report["total_sessions"] += 1
+            report["epochs_ingested"] += res["epochs_ingested"]
+            report["sessions"].append(res)
+            if res["processing_version"] == "legacy_constant_padding":
+                report["legacy_sessions_count"] += 1
+            else:
+                report["modern_sessions_count"] += 1
+        except (PermissionError, RuntimeError) as e:
+            print(f"\n[REJECTED] {j_path.parent.name}: {str(e)}")
+            report["failures"].append({"path": str(j_path), "error": str(e)})
 
     return report
+
+
+def sync_logs_to_postgres(
+    log_dir: str = "output_logs",
+    db_uri: Optional[str] = None,
+    endpoint_url: Optional[str] = None,
+    anon_key: Optional[str] = None,
+    password: Optional[str] = None,
+    quiet: bool = False
+) -> Dict[str, Any]:
+    """
+    Automatic cloud sync entry point called by LocalLogger upon session completion.
+    Defaults to HTTPS Edge Function transport (Port 443) to reliably traverse campus/corporate firewalls.
+    """
+    import os
+    endpoint = endpoint_url or os.getenv("SUPABASE_EDGE_URL") or "https://khsrpxzckidhmzdpihfu.supabase.co/functions/v1/ingest-session"
+    key = anon_key or os.getenv("SUPABASE_ANON_KEY")
+
+    # If targeting a plain SQLite file directly
+    if db_uri and not db_uri.startswith("http") and not db_uri.startswith("postgres"):
+        import sqlite3
+        if not quiet:
+            print(f"[CloudSync] Synchronizing directly via SQLite file connection: {db_uri}")
+        conn = sqlite3.connect(db_uri)
+        report = ingest_directory(conn, Path(log_dir), password=password)
+        conn.close()
+        return report
+
+    if not quiet:
+        print(f"[CloudSync] Synchronizing via HTTPS Edge Function transport: {endpoint}")
+    return ingest_directory_via_http(Path(log_dir), endpoint_url=endpoint, anon_key=key, password=password)
+

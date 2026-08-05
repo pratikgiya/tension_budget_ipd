@@ -4,7 +4,7 @@ cloud_schema.py — Phase 12 Relational Database Schema definition for TensionBu
 Implements the verified 3-Tier Privacy & Longitudinal Telemetry Hierarchy:
   Tier 1: user_profiles (Demographics and physical customization vault)
   Tier 2: sessions (Working sitting, calibration baselines, and processing_version flags)
-  Tier 3: epoch_features & self_reports (Flattened, wide-format 5-minute longitudinal metrics and RPE ratings)
+  Tier 3: epoch_features (Flattened, wide-format 5-minute longitudinal telemetry with embedded subjective strain/RPE ratings)
 
 Designed for compatibility with both local SQLite archives and cloud PostgreSQL deployments.
 """
@@ -21,7 +21,9 @@ SQLITE_DDL = [
         gender_sex TEXT,
         weight_kg REAL,
         height_cm REAL,
-        updated_at REAL
+        updated_at REAL,
+        password_hash TEXT,
+        created_via TEXT DEFAULT 'desktop_registration'
     );
     """,
     """
@@ -85,18 +87,8 @@ SQLITE_DDL = [
     );
     """,
     """
-    CREATE TABLE IF NOT EXISTS self_reports (
-        report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        timestamp REAL,
-        perceived_exertion_rating INTEGER,
-        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-    );
-    """,
-    """
     CREATE VIEW IF NOT EXISTS v_ml_training_pairs AS
     SELECT 
-        s.session_id,
         s.user_name,
         u.birth_date,
         u.gender_sex,
@@ -116,10 +108,20 @@ SQLITE_DDL = [
 def create_schema_sqlite(db_connection: sqlite3.Connection):
     """
     Initializes the TensionBudget relational database tables and views on a SQLite connection.
+    Also executes non-breaking schema migrations for existing database files.
     """
     cursor = db_connection.cursor()
     for ddl_stmt in SQLITE_DDL:
         cursor.execute(ddl_stmt)
+    # Ensure existing SQLite tables receive the password-gating integrity columns
+    try:
+        cursor.execute("ALTER TABLE user_profiles ADD COLUMN password_hash TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE user_profiles ADD COLUMN created_via TEXT DEFAULT 'desktop_registration';")
+    except sqlite3.OperationalError:
+        pass
     db_connection.commit()
 
 
@@ -130,5 +132,6 @@ def get_postgres_ddl() -> List[str]:
     pg_ddl = []
     for stmt in SQLITE_DDL:
         s = stmt.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-        pg_ddl.append(s)
+        s = s.replace("CREATE VIEW IF NOT EXISTS", "CREATE OR REPLACE VIEW")
+        pg_ddl.append(s.strip() + "\n")
     return pg_ddl

@@ -370,11 +370,11 @@ class LocalSessionLogger:
             print(f"Warning: Could not finalize metadata JSON: {e}")
         finally:
             self.is_active = False
-            if hasattr(self, "db_uri") and self.db_uri:
+            if os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_EDGE_URL") or (hasattr(self, "db_uri") and self.db_uri):
                 try:
                     from .cloud_ingest import sync_logs_to_postgres
-                    print(f"[LocalLogger] Automatically synchronizing completed session to cloud database...")
-                    sync_logs_to_postgres(log_dir=str(self.user_dir.parent), db_uri=self.db_uri, quiet=True)
-                    print(f"[LocalLogger] Automatic Supabase sync complete.")
+                    print(f"[LocalLogger] Automatically synchronizing completed session via HTTPS Edge Function transport...")
+                    sync_logs_to_postgres(log_dir=str(self.user_dir.parent), db_uri=getattr(self, "db_uri", None), quiet=False)
+                    print(f"[LocalLogger] Automatic cloud sync complete.")
                 except Exception as sync_err:
                     print(f"[LocalLogger] Notice: Automatic cloud database sync skipped or failed: {sync_err}")
