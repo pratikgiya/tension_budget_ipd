@@ -343,9 +343,24 @@ def ingest_session_pair_via_http(
         meta = json.load(f)
 
     session_id = str(meta.get("session_id", json_path.stem.replace("_metadata", "")))
-    user_prof = meta.get("user_profile", {})
-    user_name = str(user_prof.get("user_name", "Anonymous"))
     proc_version = meta.get("processing_version", "legacy_constant_padding")
+
+    # LocalSessionLogger writes user_name at root level and demographics under
+    # "user_snapshot". Legacy ingests may use the old "user_profile" key.
+    user_name = str(
+        meta.get("user_name")
+        or meta.get("user_profile", {}).get("user_name")
+        or "Anonymous"
+    )
+    snapshot = meta.get("user_snapshot") or meta.get("user_profile") or {}
+    # Build a normalised user_profile dict for the Edge Function payload
+    user_prof = {
+        "user_name": user_name,
+        "birth_date": snapshot.get("birth_date", "1900-01-01"),
+        "gender_sex": snapshot.get("gender_sex", "Unknown"),
+        "weight_kg": snapshot.get("weight_kg"),
+        "height_cm": snapshot.get("height_cm"),
+    }
 
     if not password and interactive:
         import getpass
@@ -370,17 +385,55 @@ def ingest_session_pair_via_http(
                     item[k] = parsed_val
             epoch_features.append(item)
 
+    # De-duplicate by epoch_index — keep the LAST entry for each index.
+    # Duplicates arise when "Log Strain Marker" is pressed mid-epoch, writing a
+    # second CSV row with the same epoch_index. PostgreSQL's ON CONFLICT DO UPDATE
+    # cannot update the same row twice in one batch (raises HTTP 500), so we must
+    # collapse duplicates before sending.
+    dedup: dict = {}
+    for item in epoch_features:
+        dedup[item.get("epoch_index")] = item  # later row wins
+    epoch_features = list(dedup.values())
+
+    # ── Normalise timestamps ─────────────────────────────────────────────────
+    # LocalSessionLogger stores start_time/end_time as ISO strings, not floats.
+    # Convert to unix float for the DB column; keep the raw string as _str.
+    def _iso_to_unix(s):
+        if not s:
+            return None
+        try:
+            return float(s)           # already a numeric unix ts
+        except (ValueError, TypeError):
+            pass
+        try:
+            from datetime import datetime as _dt
+            return _dt.fromisoformat(str(s)).timestamp()
+        except Exception:
+            return None
+
+    start_time_raw = meta.get("start_time", "")
+    end_time_raw   = meta.get("end_time", "")
+
+    # ── Normalise calibration ────────────────────────────────────────────────
+    # LocalSessionLogger stores: {"left": <float>, "right": <float>}
+    # Edge Function reads:       calibration.left_rms_reference / right_rms_reference
+    calib_raw = meta.get("calibration_baselines_mv") or meta.get("calibration") or {}
+    calib_normalised = {
+        "left_rms_reference":  calib_raw.get("left")  or calib_raw.get("left_rms_reference"),
+        "right_rms_reference": calib_raw.get("right") or calib_raw.get("right_rms_reference"),
+    }
+
     payload = {
         "user_name": user_name,
         "password": password or "",
         "session_metadata": {
             "session_id": session_id,
-            "start_time": _parse_val(meta.get("start_time"), "float"),
-            "start_time_str": meta.get("start_time_str", ""),
-            "end_time": _parse_val(meta.get("end_time"), "float"),
-            "end_time_str": meta.get("end_time_str", ""),
+            "start_time": _iso_to_unix(start_time_raw),
+            "start_time_str": str(start_time_raw),
+            "end_time": _iso_to_unix(end_time_raw),
+            "end_time_str": str(end_time_raw),
             "mode": meta.get("mode", "unknown"),
-            "calibration": meta.get("calibration_baselines_mv", meta.get("calibration", {})),
+            "calibration": calib_normalised,
             "processing_version": proc_version,
             "user_profile": user_prof,
             "self_reports": meta.get("self_reports", [])

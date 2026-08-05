@@ -341,7 +341,7 @@ class LocalSessionLogger:
         except Exception as e:
             print(f"Warning: Could not update calibration in metadata JSON: {e}")
 
-    def end_session(self):
+    def end_session(self, password: str = None):
         """Marks the session as completed, compresses raw telemetry to Parquet, and updates metadata JSON."""
         self.flush_raw_buffer()
         # Convert staging raw CSV into ultra-compressed Parquet archive
@@ -374,7 +374,10 @@ class LocalSessionLogger:
                 try:
                     from .cloud_ingest import sync_logs_to_postgres
                     print(f"[LocalLogger] Automatically synchronizing completed session via HTTPS Edge Function transport...")
-                    sync_logs_to_postgres(log_dir=str(self.user_dir.parent), db_uri=getattr(self, "db_uri", None), quiet=False)
+                    # Sync ONLY this session's folder — not the whole output_logs tree.
+                    # This prevents re-attempting every historical session on every stop.
+                    sync_logs_to_postgres(log_dir=str(self.session_dir), db_uri=getattr(self, "db_uri", None), quiet=False, password=password)
                     print(f"[LocalLogger] Automatic cloud sync complete.")
                 except Exception as sync_err:
                     print(f"[LocalLogger] Notice: Automatic cloud database sync skipped or failed: {sync_err}")
+

@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import time
 import json
+import math
 from pathlib import Path
 import numpy as np
 from scipy.signal import butter, filtfilt
@@ -210,6 +211,13 @@ class TensionBudgetApp(QMainWindow):
         self.in_height = QLineEdit("175.0")
         self.in_height.setMaximumWidth(65)
         user_layout.addWidget(self.in_height)
+        
+        user_layout.addWidget(QLabel("Password:"))
+        self.in_password = QLineEdit()
+        self.in_password.setPlaceholderText("Cloud sync password")
+        self.in_password.setEchoMode(QLineEdit.Password)
+        self.in_password.setMaximumWidth(130)
+        user_layout.addWidget(self.in_password)
         
         self.lbl_profile_info = QLabel("Status: Enter details before starting session.")
         self.lbl_profile_info.setStyleSheet("color: #2a6f3a; font-weight: bold;")
@@ -464,6 +472,29 @@ class TensionBudgetApp(QMainWindow):
 
     def on_toggle_stream(self):
         if not self.stream_active:
+            # ── Pre-flight validation ─────────────────────────────────────────
+            subject_name = self.in_user_name.text().strip()
+            if not subject_name or subject_name == "Default_User":
+                QMessageBox.warning(
+                    self, "Subject ID Required",
+                    "Please enter a real Subject ID / Name before starting.\n\n"
+                    "'Default_User' is a placeholder — data recorded under this name\n"
+                    "cannot be attributed to a specific participant."
+                )
+                return
+            if not self.in_password.text().strip():
+                reply = QMessageBox.question(
+                    self, "No Password Entered",
+                    "The Password field is empty.\n\n"
+                    "Without a password the cloud sync will be REJECTED (HTTP 400).\n"
+                    "Local files will still be saved.\n\n"
+                    "Continue without a password?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    return
+            # ─────────────────────────────────────────────────────────────────
             if self.mode == "live":
                 if pylsl is None:
                     QMessageBox.warning(self, "LSL Unavailable", "pylsl module is not installed. Switching to Offline mode.")
@@ -497,8 +528,18 @@ class TensionBudgetApp(QMainWindow):
                 self.btn_start_stop.setText("Connect LSL Stream")
                 self.status_label.setText("Status: Disconnected.")
                 if self.local_logger and self.local_logger.is_active:
+                    # Prompt for final strain rating on disconnect before completing session
+                    if self.isVisible() and not os.getenv("TB_HEADLESS"):
+                        elapsed_min = (getattr(self, "session_sample_count", 0) / max(1, getattr(self, "sampling_rate", 500))) / 60.0
+                        dialog = BorgStrainPopupDialog(
+                            epoch_idx=getattr(self, "last_logged_window", 0) + 1,
+                            elapsed_min=elapsed_min,
+                            parent=self
+                        )
+                        dialog.exec_()  # Synchronous modal wait since acquisition has stopped
+                        self.current_strain_rating = dialog.selected_rating
                     self._log_current_epoch(is_final=True)
-                    self.local_logger.end_session()
+                    self.local_logger.end_session(password=getattr(self, "_session_password", None))
                     self.lbl_profile_info.setText("Session Completed & Saved to output_logs/")
             else:
                 self.btn_start_stop.setText("Resume Replay")
@@ -514,6 +555,8 @@ class TensionBudgetApp(QMainWindow):
                 ht = float(self.in_height.text()) if self.in_height.text() else None
             except ValueError:
                 ht = None
+            # Capture password at session start so it can be forwarded to cloud sync at end_session
+            self._session_password = self.in_password.text().strip() or None
             self.local_logger = LocalSessionLogger(
                 user_name=self.in_user_name.text(),
                 birth_date_str=self.in_dob.text(),
@@ -822,7 +865,8 @@ class TensionBudgetApp(QMainWindow):
         # Prompt interactive modal popup during live runs without blocking signal processing thread
         if self.isVisible() and self.mode == "live" and not os.getenv("TB_HEADLESS") and not is_final:
             dialog = BorgStrainPopupDialog(epoch_idx=epoch_idx or self.last_logged_window, elapsed_min=elapsed_min, parent=self)
-            dialog.open(lambda: self._on_borg_popup_finished(dialog, epoch_idx))
+            dialog.finished.connect(lambda _result, d=dialog, ei=epoch_idx: self._on_borg_popup_finished(d, ei))
+            dialog.open()
         else:
             self._log_current_epoch(epoch_idx=epoch_idx, is_final=is_final)
 
@@ -833,6 +877,14 @@ class TensionBudgetApp(QMainWindow):
         self.current_strain_rating = None
         if hasattr(self, "strain_combo"):
             self.strain_combo.setCurrentIndex(0)
+
+    def closeEvent(self, event):
+        # Ensure clean disconnection, final Borg rating prompt, and Supabase sync if window is closed during streaming
+        if self.stream_active:
+            self.on_toggle_stream()
+        elif self.local_logger and self.local_logger.is_active:
+            self.local_logger.end_session(password=getattr(self, "_session_password", None))
+        super().closeEvent(event)
 
 
 def main():

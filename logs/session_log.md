@@ -697,4 +697,31 @@ To support seamless team collaboration without exposing credentials to Git versi
    - Build `interpretation.py` to translate statistical fatigue metrics into non-technical coaching feedback.
    - Incorporate real-time coaching banner gauges and post-session analysis scorecard modals into both Desktop GUI and Web Wasm interfaces.
 
+---
+
+## Phase 13.5 — Cloud Synchronization Polish, Borg Scale Disconnect Coverage & Parquet Telemetry Compression Fixes
+Timestamp: 2026-08-05T23:45:00+05:30
+Status: Completed
+
+### Summary
+Resolved several end-to-end operational inconsistencies identified during live multi-session testing with human subjects, ensuring data completeness, accurate calibration syncing, and seamless dependency management:
+1. **Scoped LocalLogger Sync Trigger**: Amended `end_session()` in `local_logger.py` to synchronize ONLY the specific active session directory (`self.session_dir`) upon disconnection rather than attempting to recursively ingest the entire `output_logs/` root tree. This prevents historical offline sessions or legacy folder structures from triggering redundant upload attempts or authentication failures.
+2. **Pre-Flight Authentication Enforcement**: Added pre-flight GUI modal validation checks in `tensionbudget_app.py` that block session start-up if the default placeholder subject ID or an empty password is provided, guaranteeing valid authentication credentials exist before any signal processing begins.
+3. **Payload De-duplication & Calibration Schema Harmonization**: 
+   - Updated `cloud_ingest.py` to pre-process and de-duplicate `epoch_features` rows by `epoch_index` (retaining the final state of each window) before building HTTP JSON transmission packets, eliminating potential database-side primary-key conflict failures during manual strain marker actions.
+   - Corrected dictionary parameter mappings in `cloud_ingest.py` to translate local JSON metadata keys (`calibration_baselines_mv`) into the exact reference key names (`left_rms_reference`, `right_rms_reference`) anticipated by the Deno serverless Edge Function, eliminating null values in Supabase tables.
+4. **Borg CR-10 Disconnect & Window Close Coverage**: Modified `on_toggle_stream` in `tensionbudget_app.py` to trigger a synchronous modal execution (`exec_()`) of the Borg strain dialog upon hitting 'Disconnect', allowing subjects to report perceived strain for the concluding partial epoch segment instead of defaulting to NULL/0. Implemented a Qt `closeEvent` interception hook to guarantee the exact same termination, self-report, saving, and upload sequence executes cleanly if a user closes the desktop application window while recording.
+5. **Parquet Telemetry Compression & Dependency Resolution**: Diagnosed silent fallbacks where raw 500 Hz telemetry remained uncompressed as standard `.csv` due to missing Parquet engines in clean environments. Updated `requirements.txt` to explicitly mandate `pyarrow>=25.0.0`, `pandas>=2.2.3`, and `openpyxl>=3.1.5`, guaranteeing out-of-the-box Parquet archive conversion and command-line multi-sheet Excel export functionality for all repository clones.
+
+### Files Modified
+- `chordspy/tensionbudget/local_logger.py` — [MODIFIED] Scoped automated post-session cloud upload calls directly to `self.session_dir`.
+- `chordspy/tensionbudget_app.py` — [MODIFIED] Added subject/password start-up pre-flight validation, synchronous final Borg rating dialog display upon session disconnect, and safe `closeEvent` app shutdown interception.
+- `chordspy/tensionbudget/cloud_ingest.py` — [MODIFIED] Implemented epoch row de-duplication by `epoch_index` and realigned calibration dictionary payload keys (`left_rms_reference`/`right_rms_reference`) with serverless Edge Function schema expectations.
+- `requirements.txt` — [MODIFIED] Explicitly integrated `pyarrow>=25.0.0` and `openpyxl>=3.1.5` dependencies and relaxed `pandas` versioning to `>=2.2.3` to ensure robust Parquet serialization and Excel exports across deployment environments.
+
+### Next phase & Planned Deliverables
+1. **Ergonomic UI Interpretation Engine & Coaching Dashboards**:
+   - Build `interpretation.py` to translate statistical fatigue metrics into non-technical coaching feedback.
+   - Incorporate real-time coaching banner gauges and post-session analysis scorecard modals into both Desktop GUI and Web Wasm interfaces.
+
 
