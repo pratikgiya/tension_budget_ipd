@@ -231,6 +231,8 @@ def ingest_session_pair(
                 _parse_val(row.get("is_fatiguing_left"), "bool"),
                 _parse_val(row.get("mdf_computed_right"), "bool"),
                 _parse_val(row.get("is_fatiguing_right"), "bool"),
+                0 if _parse_val(row.get("strain_reported"), "int") is None else _parse_val(row.get("strain_reported"), "int"),
+                _parse_val(row.get("subjective_strain_cr10"), "float"),
             )
 
             cursor.execute(
@@ -249,7 +251,8 @@ def ingest_session_pair(
                         asymmetry_index_ai=?, asymmetry_penalty_applied=?, mdf_hz_left=?, mdf_hz_right=?,
                         mnf_hz_left=?, mnf_hz_right=?, fatigue_slope_left=?, fatigue_slope_right=?,
                         mdf_r_squared_left=?, mdf_r_squared_right=?, n_windows_left=?, n_windows_right=?,
-                        mdf_computed_left=?, is_fatiguing_left=?, mdf_computed_right=?, is_fatiguing_right=?
+                        mdf_computed_left=?, is_fatiguing_left=?, mdf_computed_right=?, is_fatiguing_right=?,
+                        strain_reported=?, subjective_strain_cr10=?
                     WHERE session_id = ? AND epoch_index = ?
                     """,
                     (*row_data, session_id, epoch_idx)
@@ -265,8 +268,9 @@ def ingest_session_pair(
                         asymmetry_index_ai, asymmetry_penalty_applied, mdf_hz_left, mdf_hz_right,
                         mnf_hz_left, mnf_hz_right, fatigue_slope_left, fatigue_slope_right,
                         mdf_r_squared_left, mdf_r_squared_right, n_windows_left, n_windows_right,
-                        mdf_computed_left, is_fatiguing_left, mdf_computed_right, is_fatiguing_right
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        mdf_computed_left, is_fatiguing_left, mdf_computed_right, is_fatiguing_right,
+                        strain_reported, subjective_strain_cr10
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (session_id, epoch_idx, *row_data)
                 )

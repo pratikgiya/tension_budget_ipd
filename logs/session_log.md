@@ -724,4 +724,35 @@ Resolved several end-to-end operational inconsistencies identified during live m
    - Build `interpretation.py` to translate statistical fatigue metrics into non-technical coaching feedback.
    - Incorporate real-time coaching banner gauges and post-session analysis scorecard modals into both Desktop GUI and Web Wasm interfaces.
 
+---
+
+## Phase 13.6 — SUMA Burst Analytics Resolution & Comprehensive 38-Feature Telemetry Integrity Verification
+Timestamp: 2026-08-06T12:30:00+05:30
+Status: Completed
+
+### Summary
+Executed a thorough diagnostic audit and implemented an automated verification test mechanism to prove the mechanical integrity and cloud ingestion accuracy of all 38 recorded ergonomic telemetry features:
+1. **SUMA Burst & Long-Duration Gap Analytics Resolution**: Resolved an observational anomaly where the number of SUMA bursts recorded in processed feature CSVs appeared artificially capped at 1. Diagnosed the root cause in `_log_current_epoch` within `tensionbudget_app.py`: calculations for summary metrics (gaps and short SUMA bursts) were mistakenly evaluating the transient 10-second GUI visualization array buffer (`buf_l`/`buf_r`) rather than the full accumulation buffers (`epoch_filt_l`/`epoch_filt_r`). Re-routed calculation inputs to analyze complete 5-minute continuous epoch data, unlocking accurate identification of multiple consecutive SUMA bursts, valid long-duration Koch (2024) fatigue bin categorization, and accurate resting gap frequencies per epoch.
+2. **Comprehensive 38-Feature Integrity Verification Mechanism**: Created a rigorous automated verification suite (`chordspy/tensionbudget/tests/test_all_38_features_integrity.py`) to systematically verify every single one of the 38 designated feature columns defined in `CSV_HEADER`. The suite validates data precision across four critical layers:
+   - **Specification Alignment**: Asserts exact column count (38) and sequential order against structural definitions.
+   - **Local Disk Serialization**: Mechanically proves that individual EIndex values, SUMA counts, APDF distributions, asymmetry ratios, Farina fatigue regression metrics, and Borg strain target scores match decimal inputs exactly when reading back generated `.csv` files.
+   - **Relational SQL Ingestion DDL**: Proves that local SQLite / PostgreSQL ingestion mappings accurately persist all features without column dropping or truncation.
+   - **Supabase Cloud Edge Function Transmission**: Verifies that outgoing HTTP JSON payload arrays constructed for serverless Edge Function synchronization include all numeric attributes and boolean flags without data loss.
+3. **Database Ingestion Schema Bugfix**: Uncovered and patched a latent truncation in `ingest_session_pair` within `cloud_ingest.py`, where direct SQL database `INSERT/UPDATE` string queries terminated at column #36 (`is_fatiguing_right`), omitting subjective Borg ratings (`strain_reported` and `subjective_strain_cr10`). Corrected SQL query parameters and added defensive backward-compatible defaults (`0` when parsing missing integer flags in older legacy files) to strictly honor relational `NOT NULL` schema constraints.
+4. **Dependency Standardization**: Harmonized dependency declarations across `requirements.txt` and `pyproject.toml` by explicitly mandating `pyarrow>=25.0.0` and `openpyxl>=3.1.5` in poetry configurations, ensuring seamless out-of-the-box Parquet telemetry compression and Excel worksheet exports across all environments.
+
+### Files Modified & Created
+- `chordspy/tensionbudget_app.py` — [MODIFIED] Re-routed `_log_current_epoch` SUMA burst and gap analysis inputs to evaluate full 5-minute continuous arrays (`epoch_filt_l`/`epoch_filt_r`) instead of 10-second transient GUI buffers.
+- `chordspy/tensionbudget/cloud_ingest.py` — [MODIFIED] Added missing `strain_reported` and `subjective_strain_cr10` columns to relational SQL ingestion queries and enforced schema default fallbacks on missing values.
+- `chordspy/tensionbudget/tests/test_all_38_features_integrity.py` — [NEW] Created 4-part rigorous verification suite proving end-to-end telemetry accuracy across local CSVs, SQL relational tables, and Supabase Edge Function payloads.
+- `pyproject.toml` — [MODIFIED] Synchronized `pyarrow>=25.0.0` and `openpyxl>=3.1.5` dependencies with `requirements.txt`.
+
+### Verification & Test Results
+- **Full Project Verification Suite:** Executed `python -m pytest -v`, achieving **77 / 77 tests passed (100%) in 21.32s**, confirming comprehensive mathematical accuracy, zero schema regressions, and verified integrity across all 38 ergonomic feature columns.
+
+### Next phase & Planned Deliverables
+1. **Ergonomic UI Interpretation Engine & Coaching Dashboards**:
+   - Build `interpretation.py` to translate statistical fatigue metrics into non-technical coaching feedback.
+   - Incorporate real-time coaching banner gauges and post-session analysis scorecard modals into both Desktop GUI and Web Wasm interfaces.
+
 

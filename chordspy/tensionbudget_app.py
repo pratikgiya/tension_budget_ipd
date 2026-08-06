@@ -806,28 +806,54 @@ class TensionBudgetApp(QMainWindow):
             if epoch_idx == 0:
                 epoch_idx = 1
 
-        if hasattr(self, "last_sub_norm_l") and hasattr(self, "last_sub_norm_r"):
-            if not is_final or (epoch_idx > self.last_logged_window) or (getattr(self.accumulator_l, "completed_windows", 0) == 0):
-                self.accumulator_l.submit_completed_window(self.last_sub_norm_l)
-                self.accumulator_r.submit_completed_window(self.last_sub_norm_r)
-
-        score_res = getattr(self, "last_score_res", {})
-        res_l = getattr(self, "last_res_l", {})
-        res_r = getattr(self, "last_res_r", {})
         if hasattr(self, "epoch_filt_l") and len(self.epoch_filt_l) >= 256 and hasattr(self, "epoch_filt_r") and len(self.epoch_filt_r) >= 256:
+            arr_l = np.array(self.epoch_filt_l)
+            arr_r = np.array(self.epoch_filt_r)
             spec_res = analyze_bilateral_spectral_fatigue(
-                np.array(self.epoch_filt_l), np.array(self.epoch_filt_r),
+                arr_l, arr_r,
                 fs=self.sampling_rate, config=self.cfg
+            )
+            # Compute full-epoch RMS envelopes & normalized %RVE for true 5-minute SUMA duration & Gap exposure analytics
+            rms_l = self.calculate_moving_rms(np.abs(arr_l), getattr(self, "rms_window_size", 50))
+            rms_r = self.calculate_moving_rms(np.abs(arr_r), getattr(self, "rms_window_size", 50))
+            norm_l = (rms_l / max(1e-6, getattr(self, "ref_rms_left", 1.0))) * 100.0
+            norm_r = (rms_r / max(1e-6, getattr(self, "ref_rms_right", 1.0))) * 100.0
+            
+            step_samples = max(1, int(self.cfg.RMS_STEP_MS * getattr(self, "sampling_rate", 500) / 1000))
+            sub_l = norm_l[::step_samples]
+            sub_r = norm_r[::step_samples]
+            
+            res_l = analyze_channel(sub_l, config=self.cfg, is_live_buffer=False)
+            res_r = analyze_channel(sub_r, config=self.cfg, is_live_buffer=False)
+            score_res = score_bilateral_window(
+                sub_l, sub_r,
+                res_l.get("suma_bins", {}), res_r.get("suma_bins", {}),
+                res_l.get("active_apdf", {}).get(50, np.nan), res_r.get("active_apdf", {}).get(50, np.nan),
+                self.accumulator_l, self.accumulator_r,
+                config=self.cfg
             )
         else:
             spec_res = getattr(self, "last_spec_res", {})
+            score_res = getattr(self, "last_score_res", {})
+            res_l = getattr(self, "last_res_l", {})
+            res_r = getattr(self, "last_res_r", {})
+            sub_l = getattr(self, "last_sub_norm_l", None)
+            sub_r = getattr(self, "last_sub_norm_r", None)
+
+        if sub_l is not None and sub_r is not None:
+            if not is_final or (epoch_idx > self.last_logged_window) or (getattr(self.accumulator_l, "completed_windows", 0) == 0):
+                self.accumulator_l.submit_completed_window(sub_l)
+                self.accumulator_r.submit_completed_window(sub_r)
+
+        # Calculate true relaxation gap frequency per minute within this specific epoch duration
+        epoch_dur_min = (len(sub_l) * self.cfg.RMS_STEP_MS / 1000.0) / 60.0 if (sub_l is not None and len(sub_l) > 0) else max(0.1, elapsed_min)
 
         score_left_dict = {
             "eindex_live": score_res.get("eindex_live_left", 0.0),
             "eindex_cumulative": getattr(self.accumulator_l, "eindex_session_cumulative", 0.0),
             "short_suma_penalty": score_res.get("short_suma_penalty_left", 0.0),
             "suma_count": sum(res_l.get("suma_bins", {}).values()) if isinstance(res_l.get("suma_bins"), dict) else 0,
-            "gap_frequency_per_min": res_l.get("gaps_count", 0) / max(0.1, elapsed_min),
+            "gap_frequency_per_min": res_l.get("gaps_count", 0) / max(0.1, epoch_dur_min),
             "apdf_10": res_l.get("active_apdf", {}).get(10, ""),
             "apdf_50": res_l.get("active_apdf", {}).get(50, ""),
             "apdf_90": res_l.get("active_apdf", {}).get(90, ""),
@@ -837,7 +863,7 @@ class TensionBudgetApp(QMainWindow):
             "eindex_cumulative": getattr(self.accumulator_r, "eindex_session_cumulative", 0.0),
             "short_suma_penalty": score_res.get("short_suma_penalty_right", 0.0),
             "suma_count": sum(res_r.get("suma_bins", {}).values()) if isinstance(res_r.get("suma_bins"), dict) else 0,
-            "gap_frequency_per_min": res_r.get("gaps_count", 0) / max(0.1, elapsed_min),
+            "gap_frequency_per_min": res_r.get("gaps_count", 0) / max(0.1, epoch_dur_min),
             "apdf_10": res_r.get("active_apdf", {}).get(10, ""),
             "apdf_50": res_r.get("active_apdf", {}).get(50, ""),
             "apdf_90": res_r.get("active_apdf", {}).get(90, ""),
