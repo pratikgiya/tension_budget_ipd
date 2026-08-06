@@ -38,7 +38,7 @@ from chordspy.tensionbudget.config import TBConfig
 from chordspy.tensionbudget.local_logger import LocalSessionLogger
 from chordspy.tensionbudget.preprocessing import load_tb_csv, preprocess_channel, StreamingChannelProcessor
 from chordspy.tensionbudget.calibration import compute_reference_rms
-from chordspy.tensionbudget.scoring import score_bilateral_window, EIndexAccumulator
+from chordspy.tensionbudget.scoring import score_bilateral_window, EIndexAccumulator, map_composite_to_display_scale
 from chordspy.tensionbudget.spectral import analyze_bilateral_spectral_fatigue
 from chordspy.tensionbudget.analytics import analyze_channel, compute_asymmetry
 
@@ -773,7 +773,7 @@ class TensionBudgetApp(QMainWindow):
             if ai is None or not isinstance(ai, (int, float)) or np.isnan(ai):
                 ai = 0.0
 
-            self.lbl_composite.setText(f"Composite Score: {c_score:.2f} (Worst-Side Driven)")
+            self.lbl_composite.setText(f"Composite Score: {map_composite_to_display_scale(c_score):.2f} (Worst-Side Driven)")
             self.lbl_score_l.setText(f"Left Side Score: {s_left:.2f} (Live EIndex: {e_left:.2f})")
             self.lbl_score_r.setText(f"Right Side Score: {s_right:.2f} (Live EIndex: {e_right:.2f})")
 

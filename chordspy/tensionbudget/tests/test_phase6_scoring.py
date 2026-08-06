@@ -30,6 +30,7 @@ from chordspy.tensionbudget.scoring import (
     compute_composite_score,
     EIndexAccumulator,
     map_eindex_to_display_scale,
+    map_composite_to_display_scale,
 )
 from chordspy.tensionbudget.config import TBConfig
 
@@ -229,69 +230,149 @@ class TestAsymmetryIndex:
         assert abs(ai_r) == pytest.approx(abs(ai_l))
 
 
-# ── 4. Composite score (fusion + penalty + clamp) ─────────────────────
+# ── 4. Composite score (fusion + penalty + unclamped analytical output) ─────
 
 class TestCompositeScore:
+    """
+    Tests for compute_composite_score().
 
-    def test_worst_side_drives(self):
-        """min(left, right) is used as the base — the higher-loaded side wins."""
-        result = compute_composite_score(2.0, 0.5, 0.0, config=TestConfig)
-        assert result["composite_score"] == pytest.approx(0.5)  # right was worse
+    Score direction: HIGHER = WORSE.
+    Bug fixes applied in this hotfix:
+        Bug 1: fusion changed from min() → max() (worst-side-drives, higher=worse)
+        Bug 2: asymmetry penalty changed from -= → += (adds risk on top)
+        Floor clamp: removed from analytical composite_score; display clamping
+            moved to map_composite_to_display_scale() (GUI-only).
+
+    Tests that previously validated the BUGGY behavior are marked with
+    # FORMERLY WRONG, replaced inline with corrected assertions.
+    """
+
+    def test_worst_side_drives_right_overloaded(self):
+        """KEY REGRESSION: Right overloaded (2.5), left resting (-1.5).
+
+        Bug 1 failure: old min() returned -1.5 (left safe score), masking the
+        overloaded right side. After fix: max() returns +2.5 (the dangerous side).
+
+        This is the concrete failure case from the hotfix spec.
+        """
+        result = compute_composite_score(2.5, -1.5, 0.0, config=TestConfig)
+        # post-fix: max(2.5, -1.5) = 2.5 — right is the worst side
+        assert result["composite_score"] == pytest.approx(2.5)
+        assert result["worst_side"] == "left"  # score_left=2.5 >= score_right=-1.5 → left
+        # The composite must be HIGH, not low — overloaded side drives result
+        assert result["composite_score"] > 0.0
+
+    def test_worst_side_drives_left_overloaded(self):
+        """Mirror of above: Left overloaded (2.5), right resting (-1.5).
+
+        Confirms symmetry of the fix — left overload is equally driven.
+        """
+        result = compute_composite_score(-1.5, 2.5, 0.0, config=TestConfig)
+        # post-fix: max(-1.5, 2.5) = 2.5 — right is the worst side
+        assert result["composite_score"] == pytest.approx(2.5)
         assert result["worst_side"] == "right"
+        assert result["composite_score"] > 0.0
 
-    def test_worst_side_drives_left(self):
-        result = compute_composite_score(0.3, 2.0, 0.0, config=TestConfig)
-        assert result["composite_score"] == pytest.approx(0.3)
+    def test_worst_side_drives_both_positive(self):
+        """Both sides positive (loaded): higher value drives composite.
+
+        FORMERLY WRONG: old test expected min(2.0, 0.5) = 0.5 for worst_side='right'.
+        That was validating Bug 1 (min instead of max).
+        After fix: max(2.0, 0.5) = 2.0, worst_side='left'.
+        """
+        # FORMERLY: result["composite_score"] == pytest.approx(0.5) and worst_side=="right"
+        result = compute_composite_score(2.0, 0.5, 0.0, config=TestConfig)
+        assert result["composite_score"] == pytest.approx(2.0)  # left is higher, drives result
         assert result["worst_side"] == "left"
 
+    def test_worst_side_drives_left_higher_than_right(self):
+        """Left score (0.3) lower than right (2.0): right drives.
+
+        FORMERLY WRONG: old test expected composite == 0.3 (left), worst_side='left'.
+        That was min() behavior (validating Bug 1).
+        After fix: max(0.3, 2.0) = 2.0, worst_side='right'.
+        """
+        # FORMERLY: result["composite_score"] == pytest.approx(0.3) and worst_side=="left"
+        result = compute_composite_score(0.3, 2.0, 0.0, config=TestConfig)
+        assert result["composite_score"] == pytest.approx(2.0)
+        assert result["worst_side"] == "right"
+
     def test_tied_sides(self):
+        """Tied scores: result equals the shared score, worst_side='tied'."""
         result = compute_composite_score(1.0, 1.0, 0.0, config=TestConfig)
         assert result["worst_side"] == "tied"
         assert result["composite_score"] == pytest.approx(1.0)
 
-    def test_asymmetry_penalty_applied_when_above_threshold(self):
-        """AI = 0.8 > 0.5 threshold → penalty subtracted; result still positive.
+    def test_asymmetry_penalty_increases_score_when_triggered(self):
+        """KEY REGRESSION: |AI| > 0.5 threshold → penalty ADDS to composite (higher=worse).
 
-        Uses max valid per-side score (+3.0 = EIndex max +2 + freq max +1).
-        The penalty must be small enough that max_score - penalty > 0 —
-        if it's not, that's the kill-switch bug (see config.py comment).
+        Bug 2 failure: old code subtracted penalty, lowering risk when asymmetry was
+        highest. After fix: penalty is added on top, correctly raising composite.
+
+        FORMERLY WRONG: old assertion was composite == max_score - penalty.
         """
         max_score = 3.0  # EIndex +2.0 + freq penalty +1.0
         ai_above_threshold = 0.8
         result = compute_composite_score(max_score, max_score, ai_above_threshold, config=TestConfig)
         assert result["asymmetry_penalty_applied"] is True
         assert result["asymmetry_penalty_amount"] == pytest.approx(TestConfig.ASYMMETRY_PENALTY_POINTS)
-        # Must be positive — kill-switch check
-        assert result["composite_score"] > 0.0
-        assert result["composite_score"] == pytest.approx(max_score - TestConfig.ASYMMETRY_PENALTY_POINTS)
+        # FORMERLY WRONG: pytest.approx(max_score - TestConfig.ASYMMETRY_PENALTY_POINTS)
+        assert result["composite_score"] == pytest.approx(max_score + TestConfig.ASYMMETRY_PENALTY_POINTS)
+        # Penalized score must be HIGHER than base (penalty adds risk)
+        assert result["composite_score"] > max_score
+
+    def test_asymmetry_penalty_direction_low_base(self):
+        """Penalty direction with a modest base score.
+
+        With base=1.0 and AI=0.8, penalized score = 1.0 + 0.25 = 1.25.
+        Confirms penalty strictly increases the score (higher=worse direction).
+        """
+        base_score = 1.0
+        result = compute_composite_score(base_score, base_score, 0.8, config=TestConfig)
+        assert result["asymmetry_penalty_applied"] is True
+        penalized = result["composite_score"]
+        # Penalized must be strictly greater than base (penalty adds risk)
+        assert penalized > base_score
+        assert penalized == pytest.approx(base_score + TestConfig.ASYMMETRY_PENALTY_POINTS)
 
     def test_asymmetry_penalty_not_applied_when_below_threshold(self):
-        """AI = 0.3 < 0.5 threshold → no penalty."""
+        """AI = 0.3 < 0.5 threshold → no penalty. Score unchanged."""
         result = compute_composite_score(2.0, 2.0, 0.3, config=TestConfig)
         assert result["asymmetry_penalty_applied"] is False
         assert result["composite_score"] == pytest.approx(2.0)
 
-    def test_floor_clamp_prevents_negative(self):
-        """If penalty drives score negative, floor clamp brings it to 0.0.
+    def test_asymmetry_penalty_at_exact_threshold_not_applied(self):
+        """AI = exactly 0.5 (== threshold, not > threshold) → no penalty."""
+        result = compute_composite_score(1.0, 1.0, 0.5, config=TestConfig)
+        assert result["asymmetry_penalty_applied"] is False
+        assert result["composite_score"] == pytest.approx(1.0)
 
-        Uses a score just below the penalty threshold so the subtraction
-        produces a negative pre-clamp value.
+    def test_composite_can_be_negative_both_resting(self):
+        """KEY REGRESSION: Fully resting both sides → composite is negative (approx -2.0).
+
+        The analytical composite_score is UNCLAMPED. Both sides at pure rest
+        (EIndex = -2.0, zero penalty) should produce composite = -2.0, not 0.0.
+
+        Previously clamped to 0.0, flattening 'deeply resting' and
+        'borderline active' into one value for the ML model.
         """
-        # score = 0.1, penalty = 0.25 → pre-clamp = -0.15 → clamped to 0.0
-        tiny_score = 0.1
-        result = compute_composite_score(tiny_score, tiny_score, 0.9, config=TestConfig)
-        assert result["composite_score"] == 0.0  # clamped
-        assert result["pre_clamp_score"] < 0.0   # was negative before clamp
+        rest_score = -2.0   # EIndex at 100% rest, zero short-SUMA penalty
+        result = compute_composite_score(rest_score, rest_score, 0.0, config=TestConfig)
+        # Unclamped: max(-2.0, -2.0) = -2.0, no penalty
+        assert result["composite_score"] == pytest.approx(-2.0)
+        # Confirm: display scale clamps this to 0.0 for GUI
+        display = map_composite_to_display_scale(result["composite_score"])
+        assert display == pytest.approx(0.0)
 
-    def test_floor_clamp_is_last(self):
-        """Verify: penalty is applied first, THEN clamp (order must be preserved).
+    def test_composite_negative_no_penalty(self):
+        """One side slightly active, other fully resting: composite may be negative.
 
-        score = 0.1, penalty = 0.25 → pre-clamp = -0.15 → clamped = 0.0
+        Confirms variance is preserved in the resting range for ML training.
         """
-        score = 0.1
-        result = compute_composite_score(score, score, 0.9, config=TestConfig)
-        assert result["pre_clamp_score"] == pytest.approx(score - TestConfig.ASYMMETRY_PENALTY_POINTS)
-        assert result["composite_score"] == 0.0
+        result = compute_composite_score(-1.5, -1.0, 0.0, config=TestConfig)
+        # max(-1.5, -1.0) = -1.0
+        assert result["composite_score"] == pytest.approx(-1.0)
+        assert result["composite_score"] < 0.0
 
     def test_nan_ai_skips_penalty(self):
         """NaN asymmetry index → no penalty applied."""
@@ -300,19 +381,17 @@ class TestCompositeScore:
         assert result["composite_score"] == pytest.approx(1.5)
 
     def test_asymmetry_penalty_proportional_to_scale(self):
-        """Proportionality guard: the penalty must not be a kill switch.
+        """Proportionality guard: penalty is 5% of the output range, not a dominator.
 
-        At MAXIMUM valid per-side score (+3.0 = EIndex +2 + freq penalty +1),
-        triggering the asymmetry penalty must still leave a positive composite.
-        If this fails, the penalty has been rescaled for a different output range
-        (e.g., a 0-100 STAMI-mapped scale) but not updated for the current raw
-        [-2, +3] units — the exact bug this test was written to catch.
+        Output range [-2.0, +3.0] = 5.0 units. Penalty = 0.25 = 5% of range.
+        At max score (+3.0), applying penalty yields +3.25, which is still
+        finite and representable (no kill-switch behaviour).
 
-        Also asserts the penalty is less than 50% of the full output range,
-        so the penalty is always proportionate rather than dominating.
+        Post-fix: penalty is now ADDED so the check becomes: at max score,
+        result is max_score + penalty = 3.25, which is > 0 and bounded.
         """
         max_per_side_score = 2.0 + 1.0   # EIndex max + freq penalty max
-        min_per_side_score = -2.0         # EIndex min + 0 freq penalty
+        min_per_side_score = -2.0
         output_range = max_per_side_score - min_per_side_score  # 5.0 units
 
         ai_triggered = 0.8  # |AI| > ASYMMETRY_PENALTY_THRESHOLD (0.5)
@@ -321,15 +400,9 @@ class TestCompositeScore:
             max_per_side_score, max_per_side_score, ai_triggered, config=TestConfig
         )
 
-        # Core kill-switch check: at max score, penalty must NOT zero the composite
-        assert result["composite_score"] > 0.0, (
-            f"Asymmetry penalty ({TestConfig.ASYMMETRY_PENALTY_POINTS:.3f}) is a kill switch: "
-            f"at max per-side score ({max_per_side_score}), composite was zero-clamped "
-            f"(pre-clamp={result['pre_clamp_score']:.3f}). "
-            f"Penalty must be < max_per_side_score. "
-            f"If the score scale changed (e.g., STAMI 0-100 mapping applied), "
-            f"update ASYMMETRY_PENALTY_POINTS in config.py to match."
-        )
+        # Post-fix: penalized composite = max_score + penalty = 3.0 + 0.25 = 3.25
+        # FORMERLY WRONG: assertion checked composite > 0 after subtracting penalty
+        assert result["composite_score"] == pytest.approx(max_per_side_score + TestConfig.ASYMMETRY_PENALTY_POINTS)
 
         # Proportionality check: penalty < 50% of output range
         assert TestConfig.ASYMMETRY_PENALTY_POINTS < output_range * 0.5, (
@@ -346,14 +419,57 @@ class TestCompositeScore:
         )
 
     def test_output_schema_complete(self):
-        """All expected output keys are present."""
+        """All expected output keys are present. pre_clamp_score removed (no clamp)."""
         result = compute_composite_score(1.0, 2.0, 0.2, config=TestConfig)
         required_keys = {
             "composite_score", "score_left", "score_right",
             "worst_side", "asymmetry_index", "asymmetry_penalty_applied",
-            "asymmetry_penalty_amount", "pre_clamp_score", "components",
+            "asymmetry_penalty_amount", "components",
         }
         assert required_keys.issubset(result.keys())
+        # pre_clamp_score is no longer in the return dict (floor clamp removed)
+        assert "pre_clamp_score" not in result
+
+
+# ── 4b. map_composite_to_display_scale ──────────────────────────────────
+
+class TestCompositeDisplayScale:
+    """Tests for map_composite_to_display_scale() — display-only clamping."""
+
+    def test_negative_composite_clamped_to_zero(self):
+        """Deeply resting composite (≈0.0) display-clamps to 0.0.
+
+        This is intentional: negative analytical values are valid for ML
+        but displayed as 'no detected load' in the GUI.
+        """
+        assert map_composite_to_display_scale(-2.0) == pytest.approx(0.0)
+        assert map_composite_to_display_scale(-0.01) == pytest.approx(0.0)
+
+    def test_positive_in_range_passthrough(self):
+        """Values in [0.0, 3.25] pass through unchanged."""
+        assert map_composite_to_display_scale(0.0) == pytest.approx(0.0)
+        assert map_composite_to_display_scale(1.5) == pytest.approx(1.5)
+        assert map_composite_to_display_scale(3.0) == pytest.approx(3.0)
+        assert map_composite_to_display_scale(3.25) == pytest.approx(3.25)
+
+    def test_above_ceil_clamped_to_325(self):
+        """Values above 3.25 (theoretical max) clamp to 3.25."""
+        assert map_composite_to_display_scale(4.0) == pytest.approx(3.25)
+        assert map_composite_to_display_scale(100.0) == pytest.approx(3.25)
+
+    def test_display_vs_analytical_separation(self):
+        """Analytical value and display value differ for resting sessions.
+
+        This is the key invariant: composite_score (stored) can be negative,
+        display value (GUI only) is clamped to 0.0.
+        """
+        rest_result = compute_composite_score(-2.0, -2.0, 0.0, config=TestConfig)
+        analytical = rest_result["composite_score"]
+        display = map_composite_to_display_scale(analytical)
+
+        assert analytical < 0.0  # unclamped analytical value is negative
+        assert display == pytest.approx(0.0)  # display value is clamped
+        assert analytical != display  # they must differ for this case
 
 
 # ── 5. EIndexAccumulator ──────────────────────────────────────────────
@@ -596,10 +712,9 @@ class TestStamiMapping:
 
     def test_structural_guard_no_live_or_composite_mapping(self):
         """
-        Structural guard against scale mismatch bugs: map_eindex_to_display_scale()
-        is strictly scoped to eindex_session_cumulative (full-workday cumulative value).
-        It must NEVER be called on eindex_live, per-side scores, or composite_score
-        anywhere in the codebase.
+        Structural guard: map_eindex_to_display_scale() must NEVER be called
+        on eindex_live, per-side scores, or composite_score anywhere in
+        non-test production code.
         """
         import os
 
@@ -621,3 +736,39 @@ class TestStamiMapping:
                                     f"was called with forbidden argument/keyword '{bad_kw}'. "
                                     f"STAMI display mapping applies exclusively to eindex_session_cumulative."
                                 )
+
+    def test_structural_guard_no_composite_display_leak(self):
+        """
+        Structural guard: map_composite_to_display_scale() is a GUI-only function.
+        Its output MUST NEVER be written back into epoch_features, local_logger,
+        or cloud_ingest paths.
+
+        This test scans all non-test production Python files and asserts that
+        map_composite_to_display_scale() is NOT called from:
+            - local_logger.py
+            - cloud_ingest.py
+            - cloud_schema.py
+
+        Rationale: Clamping the analytical composite_score before storage would
+        flatten the resting range [-2.0, 0.0) into a single value (0.0),
+        destroying the variance the ML model needs to distinguish
+        'deeply resting' from 'borderline active' epochs.
+        """
+        import os
+
+        chordspy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Files that must never call map_composite_to_display_scale()
+        forbidden_files = {'local_logger.py', 'cloud_ingest.py', 'cloud_schema.py'}
+
+        for root, dirs, files in os.walk(chordspy_root):
+            for file in files:
+                if file in forbidden_files:
+                    filepath = os.path.join(root, file)
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    assert 'map_composite_to_display_scale' not in content, (
+                        f"Display-scale leak: map_composite_to_display_scale() was found in "
+                        f"'{file}' at {filepath}. This function is GUI-only and must "
+                        f"never appear in storage, logging, or cloud ingestion code. "
+                        f"The analytical composite_score must be written to epoch_features unclamped."
+                    )

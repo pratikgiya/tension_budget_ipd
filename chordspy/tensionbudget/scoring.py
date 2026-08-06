@@ -21,9 +21,12 @@ All tuneable constants are in TBConfig — no magic numbers here.
 Pipeline order (MUST be preserved):
     1. Per-side: compute EIndex (base + frequency term)
     2. Per-side: independent score
-    3. Fusion:   Composite = min(Score_L, Score_R)  [worst-side-drives]
-    4. Penalty:  subtract ASYMMETRY_PENALTY_POINTS if |AI| > ASYMMETRY_PENALTY_THRESHOLD
-    5. Clamp:    max(0.0, Composite)  ← floor clamp is LAST, after penalty
+    3. Fusion:   Composite = max(Score_L, Score_R)  [worst-side-drives, higher=worse]
+    4. Penalty:  add ASYMMETRY_PENALTY_POINTS if |AI| > ASYMMETRY_PENALTY_THRESHOLD
+    5. Return unclamped value as the analytical / ML-training composite_score.
+       (range approx [-2.0, +3.25] after fixes)
+    6. Display only: map_composite_to_display_scale() clamps to [0.0, 3.25] — UI only,
+       NEVER written back to epoch_features or used as training target.
 
 EIndex split (fixes unbounded-growth bug, verified via simulation):
     eindex_live:
@@ -212,30 +215,42 @@ def compute_composite_score(
     """
     Fuse per-side scores into the final composite Tension Budget score.
 
+    Score convention: HIGHER = WORSE (more exposure/risk).
+        Per-side scores from compute_per_side_score() range [-2.0, +3.0]
+        where -2.0 = fully resting, +3.0 = maximum load + maximum SUMA penalty.
+
     Fusion rule: WORST-SIDE-DRIVES (project design choice).
         Rationale: The trapezius works as a bilateral muscle group under
         shared neural control. In asymmetric desk work (mousing posture,
         monitor offset, etc.), one side typically accumulates load faster.
-        Using the MINIMUM score (= the side that has gone further into
-        positive/high-load territory) ensures the alert reflects the
-        worst-off side, not an averaged-away signal. A user who is
-        overloading their right side but resting their left should still
-        see a high score.
+        Using the MAXIMUM score (= the side with higher exposure/risk)
+        ensures the composite reflects the worst-off side, not an
+        averaged-away signal. A user overloading their right side while
+        the left rests will see a composite driven by the right.
 
     Pipeline order (MUST be followed exactly):
-        1. base = min(score_left, score_right)    [worst-side-drives]
+        1. base = max(score_left, score_right)    [worst-side-drives, higher=worse]
         2. If |AI| > ASYMMETRY_PENALTY_THRESHOLD:
-               base -= ASYMMETRY_PENALTY_POINTS   [asymmetry penalty added]
-        3. composite = max(0.0, base)             [floor clamp — LAST]
+               base += ASYMMETRY_PENALTY_POINTS   [spinal-torque risk added on top]
+        3. Return base UNCLAMPED as composite_score (analytical / ML-training value).
+           Range: approx [-2.0, +3.25] after both fixes.
+
+    Floor clamp — analytical vs display split:
+        composite_score is returned unclamped so the full [-2.0, +3.25] range
+        is available for ML training. Clamping the negative (resting) range to
+        0.0 would flatten "deeply resting" and "borderline active" into one value,
+        destroying variance the regression model needs.
+
+        For GUI display use map_composite_to_display_scale() which clamps to
+        [0.0, 3.25]. That function MUST NOT be used to produce values written
+        back into epoch_features, local_logger, or cloud ingestion paths.
 
     Compounding rationale (documented intentional design):
         - Worst-side-drives captures amplitude-domain load asymmetry.
         - Asymmetry penalty captures the spinal torque / uneven mechanical
           load risk that EXISTS IN ADDITION to per-side load — a user with
           symmetric high load has a different risk profile than one with
-          identical worst-side load but severe imbalance.
-        - Floor clamp prevents negative scores (physically meaningless;
-          a score of 0 means "no detected tension load").
+          identical worst-side load but severe lateral imbalance.
 
     Args:
         score_left: Per-side score for left trapezius (from compute_per_side_score).
@@ -245,19 +260,22 @@ def compute_composite_score(
 
     Returns:
         dict with keys:
-            'composite_score': float >= 0.0
+            'composite_score': float, UNCLAMPED, range approx [-2.0, +3.25].
+                This is the analytical / ML-training value. Do NOT clamp before
+                writing to epoch_features. For display, use
+                map_composite_to_display_scale() separately.
             'score_left': float (input, unchanged)
             'score_right': float (input, unchanged)
             'worst_side': 'left' | 'right' | 'tied'
-            'asymmetry_index': float or np.nan
+            'asymmetry_index': float or None
             'asymmetry_penalty_applied': bool
-            'pre_clamp_score': float (before floor clamp)
+            'asymmetry_penalty_amount': float
             'components': dict (breakdown for explainability)
     """
     cfg = config or TBConfig
 
-    # Step 1: worst-side fusion
-    if score_left <= score_right:
+    # Step 1: worst-side fusion — higher score = worse, so use max()
+    if score_left >= score_right:
         base = score_left
         worst_side = "left"
     else:
@@ -267,34 +285,31 @@ def compute_composite_score(
     if score_left == score_right:
         worst_side = "tied"
 
-    # Step 2: asymmetry penalty
+    # Step 2: asymmetry penalty — ADD on top (higher = worse direction)
     penalty_applied = False
     penalty_amount = 0.0
 
     if not np.isnan(asymmetry_index):
         if abs(asymmetry_index) > cfg.ASYMMETRY_PENALTY_THRESHOLD:
             penalty_amount = cfg.ASYMMETRY_PENALTY_POINTS
-            base -= penalty_amount
+            base += penalty_amount
             penalty_applied = True
 
-    pre_clamp = base
-
-    # Step 3: floor clamp — LAST operation
-    composite = max(0.0, pre_clamp)
+    # Step 3: return UNCLAMPED (analytical / ML-training value)
+    # Use map_composite_to_display_scale() for GUI display.
+    composite = base
 
     return {
-        "composite_score": float(composite),
+        "composite_score": float(composite),  # UNCLAMPED — do not clamp before logging
         "score_left": float(score_left),
         "score_right": float(score_right),
         "worst_side": worst_side,
         "asymmetry_index": float(asymmetry_index) if not np.isnan(asymmetry_index) else None,
         "asymmetry_penalty_applied": penalty_applied,
         "asymmetry_penalty_amount": float(penalty_amount),
-        "pre_clamp_score": float(pre_clamp),
         "components": {
             "base_worst_side_score": float(score_left if worst_side in ("left", "tied") else score_right),
             "asymmetry_penalty": float(penalty_amount),
-            "floor_clamp_applied": composite != pre_clamp,
         },
     }
 
@@ -383,7 +398,7 @@ class EIndexAccumulator:
         return self._completed_window_count
 
 
-# ── 5. STAMI display-scale mapping (eindex_session_cumulative only) ──
+# ── 5. Display-scale mappings ─────────────────────────────────────────
 
 def map_eindex_to_display_scale(cumulative_eindex, floor=None, ceil=None, config=None):
     """
@@ -412,6 +427,48 @@ def map_eindex_to_display_scale(cumulative_eindex, floor=None, ceil=None, config
         return 0.0
     normalized = ((cumulative_eindex - floor) / (ceil - floor)) * 100.0
     return float(np.clip(normalized, 0.0, 100.0))
+
+
+def map_composite_to_display_scale(composite_score):
+    """
+    Clamp the analytical composite_score to a GUI-safe display range.
+
+    DISPLAY-ONLY. This function exists solely to drive gauge widgets and
+    coaching banners in the GUI. It MUST NOT be used to produce values
+    written back into epoch_features, local_logger, cloud_ingest, or any
+    path that stores data or trains the ML model.
+
+    The analytical composite_score returned by compute_composite_score() is
+    intentionally unclamped (range approx [-2.0, +3.25]) to preserve full
+    variance for the Bayesian/ordinal regression model. Clamping the
+    negative (resting) range to 0.0 in storage would flatten "deeply
+    resting" and "borderline active" into one value, destroying exactly the
+    resolution the ML target needs.
+
+    Display mapping:
+        composite_score < 0.0  → display 0.0  (negative scores are valid
+                                                analytically but visually
+                                                displayed as "no detected load")
+        composite_score in [0.0, 3.25] → unchanged
+        composite_score > 3.25 → display 3.25 (theoretical maximum;
+                                                 EIndex max +2.0 + freq max
+                                                 +1.0 + asymmetry +0.25)
+
+    Structural guard: the test_structural_guard_no_composite_display_leak()
+    test in test_phase6_scoring.py asserts that this function is never
+    called from local_logger.py, cloud_ingest.py, or any path that assigns
+    its output to composite_score before storage.
+
+    Args:
+        composite_score: float — raw unclamped analytical output from
+            compute_composite_score()['composite_score'].
+
+    Returns:
+        float in [0.0, 3.25] — safe for GUI gauge/banner display only.
+    """
+    DISPLAY_FLOOR = 0.0
+    DISPLAY_CEIL = 3.25  # EIndex max(2.0) + freq max(1.0) + asymmetry penalty(0.25)
+    return float(np.clip(composite_score, DISPLAY_FLOOR, DISPLAY_CEIL))
 
 
 # ── 6. Full scoring pass (convenience wrapper) ────────────────────────
